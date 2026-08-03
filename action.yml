@@ -1,0 +1,77 @@
+name: "Offload Security Scan"
+description: "Scan a repository for secrets, vulnerable dependencies, and IaC misconfigurations — open-source, powered by Offload Security."
+branding:
+  icon: "shield"
+  color: "blue"
+
+inputs:
+  path:
+    description: "Directory to scan"
+    required: false
+    default: "."
+  scanners:
+    description: "Comma-separated scanners: secrets,sbom,sca,iac"
+    required: false
+    default: "secrets,sbom,sca,iac"
+  fail-on:
+    description: "Fail the job if a finding is at or above this severity (critical|high|medium|low). Empty = never fail."
+    required: false
+    default: "high"
+  format:
+    description: "Output format written to the log: table | json | sarif"
+    required: false
+    default: "table"
+  sarif-file:
+    description: "If set, also write SARIF to this path (upload it with github/codeql-action/upload-sarif)."
+    required: false
+    default: ""
+  version:
+    description: "offload-cli version/ref to build (tag, branch, or commit)"
+    required: false
+    default: "main"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install scanner tools
+      shell: bash
+      run: |
+        set -euo pipefail
+        # gitleaks, syft, grype, trivy — official install scripts.
+        curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+        curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+        curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+        # gitleaks binary
+        GL_VER=8.24.3
+        curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VER}/gitleaks_${GL_VER}_linux_x64.tar.gz" \
+          | tar -xz -C /tmp gitleaks && sudo mv /tmp/gitleaks /usr/local/bin/
+
+    - name: Build offload-cli
+      shell: bash
+      env:
+        OFFLOAD_REF: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        go install "github.com/offloadsecurity/offload-cli@${OFFLOAD_REF}" 2>/dev/null || {
+          git clone --depth 1 --branch "${OFFLOAD_REF}" https://github.com/offloadsecurity/offload-cli /tmp/offload-cli || \
+          git clone --depth 1 https://github.com/offloadsecurity/offload-cli /tmp/offload-cli
+          ( cd /tmp/offload-cli && go build -o /usr/local/bin/offload . )
+        }
+        command -v offload || cp "$(go env GOPATH)/bin/offload-cli" /usr/local/bin/offload
+
+    - name: Run Offload scan
+      shell: bash
+      env:
+        IN_PATH: ${{ inputs.path }}
+        IN_SCANNERS: ${{ inputs.scanners }}
+        IN_FAIL_ON: ${{ inputs.fail-on }}
+        IN_FORMAT: ${{ inputs.format }}
+        IN_SARIF: ${{ inputs.sarif-file }}
+      run: |
+        set -euo pipefail
+        args=(scan "$IN_PATH" --scanners "$IN_SCANNERS" --format "$IN_FORMAT")
+        if [ -n "$IN_FAIL_ON" ]; then args+=(--fail-on "$IN_FAIL_ON"); fi
+        offload "${args[@]}"
+        if [ -n "$IN_SARIF" ]; then
+          offload scan "$IN_PATH" --scanners "$IN_SCANNERS" --format sarif --output "$IN_SARIF" || true
+        fi

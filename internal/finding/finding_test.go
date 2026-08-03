@@ -1,0 +1,52 @@
+package finding
+
+import "testing"
+
+func TestSeverityRankAndAtLeast(t *testing.T) {
+	if Critical.Rank() >= High.Rank() {
+		t.Fatalf("critical should outrank high")
+	}
+	if !High.AtLeast(Medium) {
+		t.Errorf("high should be >= medium")
+	}
+	if Low.AtLeast(High) {
+		t.Errorf("low should not be >= high")
+	}
+}
+
+func TestNormalizeSeverity(t *testing.T) {
+	cases := map[string]Severity{
+		"CRITICAL": Critical, "Error": High, "warning": Medium,
+		"negligible": Low, "": Info, "bogus": Info, "Moderate": Medium,
+	}
+	for in, want := range cases {
+		if got := NormalizeSeverity(in); got != want {
+			t.Errorf("NormalizeSeverity(%q)=%q want %q", in, got, want)
+		}
+	}
+}
+
+// Fingerprint must be stable, tool-independent, and severity-independent so the
+// same real issue collapses to one identity across tools and rescans.
+func TestFingerprintStableAcrossToolAndSeverity(t *testing.T) {
+	a := New(Finding{Category: CategoryPackageVuln, PrimaryIdentifier: "CVE-2021-1", Package: "lodash", Severity: High, Tool: "grype"})
+	b := New(Finding{Category: CategoryPackageVuln, PrimaryIdentifier: "CVE-2021-1", Package: "lodash", Severity: Critical, Tool: "trivy"})
+	if a.Fingerprint != b.Fingerprint {
+		t.Errorf("fingerprint should ignore tool/severity: %s != %s", a.Fingerprint, b.Fingerprint)
+	}
+	c := New(Finding{Category: CategoryPackageVuln, PrimaryIdentifier: "CVE-2021-2", Package: "lodash", Severity: High})
+	if a.Fingerprint == c.Fingerprint {
+		t.Errorf("different CVE should differ")
+	}
+	if len(a.Fingerprint) != 32 {
+		t.Errorf("fingerprint should be 32 hex chars, got %d", len(a.Fingerprint))
+	}
+}
+
+func TestFingerprintCategoriesDiffer(t *testing.T) {
+	secret := New(Finding{Category: CategorySecret, RuleID: "aws-access-token", File: "a.py", Snippet: "AKIA..."})
+	iac := New(Finding{Category: CategoryIaC, RuleID: "AVD-AWS-0086", File: "main.tf", Resource: "aws_sg.x"})
+	if secret.Fingerprint == iac.Fingerprint {
+		t.Errorf("distinct categories must not collide")
+	}
+}
