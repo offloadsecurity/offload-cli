@@ -102,6 +102,16 @@ Every finding carries a stable `finding_fingerprint` (SHA-256 over category + id
 
 `offload-cli` gives you the detection edge for free. The [Offload platform](https://offloadsecurity.com) adds what a single scan can't: deduplicated risk across every repo and cloud account, identity-aware attack paths to crown-jewel assets, and compliance evidence mapped to frameworks — SaaS or fully on-premises.
 
+## Built on
+
+offload-cli stands on excellent open-source tools, which it runs as external
+programs (it does not embed or redistribute them):
+[syft](https://github.com/anchore/syft) & [grype](https://github.com/anchore/grype)
+(Apache-2.0, © Anchore), [trivy](https://github.com/aquasecurity/trivy)
+(Apache-2.0, © Aqua Security), and [gitleaks](https://github.com/gitleaks/gitleaks)
+(MIT). offload-cli is not affiliated with or endorsed by these projects; names
+are used only to describe what it wraps. See [NOTICE](NOTICE).
+
 ## License
 
 [Apache License 2.0](LICENSE). Contributions welcome.

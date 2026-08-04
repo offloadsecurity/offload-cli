@@ -1,0 +1,27 @@
+offload-cli
+Copyright 2026 Offload Security
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+------------------------------------------------------------------------------
+Third-party tools
+------------------------------------------------------------------------------
+
+offload-cli orchestrates the following independent, separately-licensed tools
+by invoking them as external programs. It does not embed, link, or redistribute
+their code. Each remains the property of its respective owner and is used under
+its own license:
+
+  - Syft      — Apache License 2.0 — © Anchore, Inc.
+                https://github.com/anchore/syft
+  - Grype     — Apache License 2.0 — © Anchore, Inc.
+                https://github.com/anchore/grype
+  - Trivy     — Apache License 2.0 — © Aqua Security Software Ltd.
+                https://github.com/aquasecurity/trivy
+  - Gitleaks  — MIT License        — © Zachary Rice
+                https://github.com/gitleaks/gitleaks
+
+offload-cli and Offload Security are not affiliated with, sponsored by, or
+endorsed by Anchore, Aqua Security, or the Gitleaks project. Product and tool
+names are used nominatively, only to describe interoperability. All trademarks
+are the property of their respective owners.
