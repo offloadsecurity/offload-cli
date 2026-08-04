@@ -25,10 +25,6 @@ inputs:
     description: "If set, also write SARIF to this path (upload it with github/codeql-action/upload-sarif)."
     required: false
     default: ""
-  version:
-    description: "offload-cli version/ref to build (tag, branch, or commit)"
-    required: false
-    default: "main"
 
 runs:
   using: "composite"
@@ -48,16 +44,13 @@ runs:
 
     - name: Build offload-cli
       shell: bash
-      env:
-        OFFLOAD_REF: ${{ inputs.version }}
       run: |
         set -euo pipefail
-        go install "github.com/offloadsecurity/offload-cli@${OFFLOAD_REF}" 2>/dev/null || {
-          git clone --depth 1 --branch "${OFFLOAD_REF}" https://github.com/offloadsecurity/offload-cli /tmp/offload-cli || \
-          git clone --depth 1 https://github.com/offloadsecurity/offload-cli /tmp/offload-cli
-          ( cd /tmp/offload-cli && go build -o /usr/local/bin/offload . )
-        }
-        command -v offload || cp "$(go env GOPATH)/bin/offload-cli" /usr/local/bin/offload
+        # Build from the action's OWN checked-out source ($GITHUB_ACTION_PATH),
+        # so the CLI always matches the exact action ref the user pinned. This
+        # is deterministic — no floating @main via the module proxy.
+        go build -o /usr/local/bin/offload "$GITHUB_ACTION_PATH"
+        offload version
 
     - name: Run Offload scan
       shell: bash
