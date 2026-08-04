@@ -124,18 +124,28 @@ func SARIF(w io.Writer, rep scan.Report, version string) error {
 				"tool":     f.Tool,
 			},
 		}
-		if f.File != "" {
-			var region *sarifRegion
-			if f.LineStart > 0 {
-				region = &sarifRegion{StartLine: f.LineStart, EndLine: f.LineEnd}
+		// GitHub code scanning requires every result to carry at least one
+		// location. Use the file when we have one; otherwise fall back to the
+		// package coordinates so dependency findings (which may not map to a
+		// source line) still validate.
+		uri := f.File
+		if uri == "" {
+			if f.Package != "" {
+				uri = f.Package
+			} else {
+				uri = "unknown"
 			}
-			res.Locations = []sarifLocation{{
-				PhysicalLocation: sarifPhysical{
-					ArtifactLocation: sarifArtifact{URI: f.File},
-					Region:           region,
-				},
-			}}
 		}
+		var region *sarifRegion
+		if f.File != "" && f.LineStart > 0 {
+			region = &sarifRegion{StartLine: f.LineStart, EndLine: f.LineEnd}
+		}
+		res.Locations = []sarifLocation{{
+			PhysicalLocation: sarifPhysical{
+				ArtifactLocation: sarifArtifact{URI: uri},
+				Region:           region,
+			},
+		}}
 		results = append(results, res)
 	}
 

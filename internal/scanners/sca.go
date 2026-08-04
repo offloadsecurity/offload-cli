@@ -29,10 +29,13 @@ type grypeReport struct {
 			CVSS []grypeCVSS `json:"cvss"`
 		} `json:"relatedVulnerabilities"`
 		Artifact struct {
-			Name    string `json:"name"`
-			Version string `json:"version"`
-			Type    string `json:"type"`
-			PURL    string `json:"purl"`
+			Name      string `json:"name"`
+			Version   string `json:"version"`
+			Type      string `json:"type"`
+			PURL      string `json:"purl"`
+			Locations []struct {
+				Path string `json:"path"`
+			} `json:"locations"`
 		} `json:"artifact"`
 	} `json:"matches"`
 }
@@ -92,6 +95,12 @@ func SCA(ctx context.Context, sbomPath string) ([]finding.Finding, Result) {
 				}
 			}
 		}
+		manifest := ""
+		if len(m.Artifact.Locations) > 0 {
+			// grype reports paths rooted at the scan dir with a leading slash;
+			// strip it so SARIF/GitHub see a repo-relative path.
+			manifest = strings.TrimPrefix(m.Artifact.Locations[0].Path, "/")
+		}
 		title := v.ID + " in " + m.Artifact.Name
 		desc := ""
 		if fix != "" {
@@ -106,6 +115,7 @@ func SCA(ctx context.Context, sbomPath string) ([]finding.Finding, Result) {
 			Description:       desc,
 			RuleID:            v.ID,
 			PrimaryIdentifier: v.ID,
+			File:              manifest,
 			Package:           m.Artifact.Name,
 			Version:           m.Artifact.Version,
 			Ecosystem:         m.Artifact.Type,
