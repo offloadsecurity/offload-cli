@@ -48,8 +48,9 @@ runs:
         set -euo pipefail
         # Build from the action's OWN checked-out source ($GITHUB_ACTION_PATH),
         # so the CLI always matches the exact action ref the user pinned. This
-        # is deterministic — no floating @main via the module proxy.
-        go build -o /usr/local/bin/offload "$GITHUB_ACTION_PATH"
+        # is deterministic — no floating @main via the module proxy. Build from
+        # inside that dir so Go finds the module (the caller's repo has no go.mod).
+        ( cd "$GITHUB_ACTION_PATH" && go build -o /usr/local/bin/offload . )
         offload version
 
     - name: Run Offload scan
