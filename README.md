@@ -83,7 +83,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with: { go-version: "1.21" }
-      - uses: offloadsecurity/offload-cli@main
+      - uses: offloadsecurity/offload-cli@v0.1.3
         with:
           path: .
           fail-on: high
