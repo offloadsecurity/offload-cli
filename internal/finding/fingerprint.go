@@ -10,7 +10,8 @@ import (
 // Fingerprint produces a stable, scanner-independent identity for a finding,
 // mirroring backend/services/finding_fingerprint.build_fingerprint: a SHA-256
 // over the category plus a small set of identity discriminators, truncated to
-// 32 hex chars. It deliberately EXCLUDES the tool name, severity, line numbers,
+// 32 hex chars. It deliberately EXCLUDES the tool name, severity, line numbers
+// (except for secrets, see below),
 // and timestamps so the same real issue found by different tools (or re-found
 // on a later scan) collapses to one identity.
 func Fingerprint(f Finding) string {
