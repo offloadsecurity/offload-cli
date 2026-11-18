@@ -159,7 +159,7 @@ offload scan . --fail-on high                   # exit 3 if any finding ≥ high
 | `--no-verdicts` | disable [secret verdicts](#secret-verdicts) (raw gitleaks behaviour) | verdicts on |
 | `--hide-dismissed` | leave secrets dismissed as not real out of the output (still counted) | shown |
 
-**Exit codes:** `0` success · `2` usage error · `3` `--fail-on` threshold hit.
+**Exit codes:** `0` success · `2` usage error · `3` `--fail-on` threshold hit · `4` upload failed (see below).
 
 ## GitHub Action
 
@@ -198,6 +198,9 @@ If you pin the Action to a commit SHA or a branch instead of a release tag, ther
 | `format` | log output: `table` \| `json` \| `sarif` | `table` |
 | `sarif-file` | also write SARIF here (written even when `fail-on` trips) | none |
 | `cli-version` | release of the CLI to download, e.g. `v0.2.0` | the action ref |
+| `upload` | send findings to the Offload platform (see [Send results to Offload](#send-results-to-offload)) | `false` |
+| `platform-url` | Offload platform URL; falls back to `OFFLOAD_URL` env | none |
+| `api-key` | CI/CD API key, from a secret; falls back to `OFFLOAD_API_KEY` env | none |
 
 <!-- Feature sections (e.g. "Secret verdicts", "Send results to Offload") go below this line. -->
 
@@ -220,8 +223,33 @@ Summary: 1 critical  1 high  (2 counted)  1 dismissed as not secrets
 
 - Only a **high-confidence** non-secret verdict dismisses a finding: placeholders, env/secret-store references, runtime expressions, code handling a variable, hashed values. A hardcoded literal that merely looks weak (`password = "admin"`) stays a secret, and a generated-looking value is never dismissed because of its variable name or a nearby word like `example`. Weaker evidence, such as a GitHub/npm token failing its built-in checksum, is tagged `[review: …]` and still counts.
 - Dismissed findings are **kept**: listed after the real ones, counted in the summary, and excluded from `--fail-on`. JSON carries the verdict as `secret_verdict` (with `summary.dismissed`); SARIF carries it in `properties.secretVerdict` and reports dismissed results at level `note`.
-- `--hide-dismissed` leaves them out of the output (the summary still counts them); `--no-verdicts` restores raw gitleaks behaviour.
+- `--hide-dismissed` leaves them out of the output (the summary still counts them); `--no-verdicts` restores raw gitleaks behaviour. `--upload` always sends every finding, dismissed ones included, at the scanner's severity, so the platform applies its own verdicts; `offload upload` refuses a JSON report written with `--hide-dismissed`.
 - Verdicts are **heuristics**, not proof: always check the reason. Reasons describe the value by a mask and never quote the source line. gitleaks' own allowlists already drop many placeholders, so verdicts mostly act on what gets past them.
+
+## Send results to Offload
+
+`--upload` sends the findings to your Offload Security platform through its SARIF import (`POST /api/cicd/sarif/upload`), so they show up in **Code Command Center → SARIF Imports** next to your other code findings.
+
+1. In the platform, open your profile menu → **API Keys** → **Create API Key**, and pick the **CI/CD Pipeline** scope preset (it includes the `scans:trigger` scope the upload needs). The key's owner also needs the Run Scans permission.
+2. Run:
+
+```bash
+export OFFLOAD_URL=https://offload.example.com
+export OFFLOAD_API_KEY=osk_...            # from a CI secret; never passed as a flag
+offload scan . --upload --fail-on high
+
+offload scan . --format json --output results.json
+offload upload results.json               # or send a saved JSON report later
+```
+
+- The repository, branch and commit are read from GitHub Actions' environment or from `git` (`remote get-url origin`, the current branch, `HEAD`); override them with `--repository`, `--branch`, `--default-branch` and `--commit`.
+- Each scanner is sent as its own run. When the branch is known, the upload is a full run, so findings that scanner no longer reports on that branch are resolved on the platform. A **skipped** scanner is not sent, so nothing is resolved on its behalf. If the branch is unknown, the upload is partial and nothing is resolved; the CLI prints a warning when this happens.
+- Secrets are sent as the rule, file and line only, never the matched text. SBOM component entries (`--sbom-components`) are not uploaded.
+- TLS is always verified. For a private CA, set `OFFLOAD_CA_CERT=/path/to/ca.pem`. Plain `http://` is refused except to localhost.
+- 429 and 5xx responses are retried a bounded number of times. If the combined upload is too large it is resent as one upload per scanner, and if a single scanner's upload is still too large the CLI fails and prints its count. Nothing is truncated.
+- Exit codes: if `--fail-on` is hit the exit code is `3`, even when the upload also failed. If only the upload failed it is `4`. The upload runs before the gate, so findings are sent even when the gate fails the job.
+
+In the GitHub Action, add `upload: true`, `platform-url: ${{ vars.OFFLOAD_URL }}` and `api-key: ${{ secrets.OFFLOAD_API_KEY }}`. Either input can instead come from `OFFLOAD_URL` / `OFFLOAD_API_KEY` set as job or workflow `env`. If the key or URL is missing, for example because secrets are not passed to pull requests from forks, the Action prints a warning and skips the upload.
 
 ## The finding model
 

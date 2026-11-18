@@ -19,6 +19,7 @@ func usage(w io.Writer) {
 
 USAGE:
   offload scan [path] [flags]     scan a directory (default ".")
+  offload upload <results.json>   send a saved JSON report to the platform
   offload version                 print version
   offload help                    show this help
 
@@ -33,6 +34,15 @@ SCAN FLAGS:
   --no-verdicts       disable secret verdicts (raw gitleaks behaviour)
   --hide-dismissed    leave secrets dismissed as not real out of the output
                       (the summary still counts them)
+  --upload            send findings to the Offload platform (exit 4 if it
+                      fails; a --fail-on hit still exits 3)
+
+UPLOAD (scan --upload, or offload upload):
+  OFFLOAD_URL / --platform-url   platform URL, e.g. https://offload.example.com
+  OFFLOAD_API_KEY                CI/CD API key (env only, never a flag)
+  OFFLOAD_CA_CERT                optional CA bundle for a private CA
+  --repository, --branch, --default-branch, --commit
+                                 override git / GitHub Actions detection
 
 EXAMPLES:
   offload scan .

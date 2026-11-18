@@ -32,6 +32,18 @@ inputs:
       and want the prebuilt binary instead of a source build.
     required: false
     default: ""
+  upload:
+    description: "Send findings to an Offload Security platform (needs a platform URL and API key). Exit code 4 if the upload fails."
+    required: false
+    default: "false"
+  platform-url:
+    description: "Offload platform URL, e.g. https://offload.example.com. Falls back to an OFFLOAD_URL env var set at job or workflow level."
+    required: false
+    default: ""
+  api-key:
+    description: "Offload CI/CD API key with the scans:trigger scope. Pass it from a secret (e.g. secrets.OFFLOAD_API_KEY), never inline. Falls back to an OFFLOAD_API_KEY env var set at job or workflow level."
+    required: false
+    default: ""
 
 runs:
   using: "composite"
@@ -87,6 +99,9 @@ runs:
         IN_FAIL_ON: ${{ inputs.fail-on }}
         IN_FORMAT: ${{ inputs.format }}
         IN_SARIF: ${{ inputs.sarif-file }}
+        IN_UPLOAD: ${{ inputs.upload }}
+        IN_PLATFORM_URL: ${{ inputs.platform-url }}
+        IN_API_KEY: ${{ inputs.api-key }}
       run: |
         set -euo pipefail
         # Write SARIF first: the gated run below exits 3 when fail-on is hit,
@@ -96,4 +111,19 @@ runs:
         fi
         args=(scan "$IN_PATH" --scanners "$IN_SCANNERS" --format "$IN_FORMAT")
         if [ -n "$IN_FAIL_ON" ]; then args+=(--fail-on "$IN_FAIL_ON"); fi
+        if [ "$IN_UPLOAD" = "true" ]; then
+          # Inputs win; otherwise keep OFFLOAD_URL / OFFLOAD_API_KEY inherited
+          # from job or workflow env.
+          if [ -n "$IN_PLATFORM_URL" ]; then export OFFLOAD_URL="$IN_PLATFORM_URL"; fi
+          if [ -n "$IN_API_KEY" ]; then export OFFLOAD_API_KEY="$IN_API_KEY"; fi
+          # Secrets are not available to pull requests from forks: say so
+          # instead of failing the job.
+          if [ -z "${OFFLOAD_API_KEY:-}" ]; then
+            echo "::warning::upload: no API key (api-key input or OFFLOAD_API_KEY env; secret not available?); findings were not sent to Offload"
+          elif [ -z "${OFFLOAD_URL:-}" ]; then
+            echo "::warning::upload: no platform URL (platform-url input or OFFLOAD_URL env); findings were not sent to Offload"
+          else
+            args+=(--upload)
+          fi
+        fi
         offload "${args[@]}"

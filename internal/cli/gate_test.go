@@ -66,3 +66,19 @@ func TestReorderKnowsNewBoolFlags(t *testing.T) {
 		}
 	}
 }
+
+// runScan keeps the full report for --upload before --hide-dismissed trims
+// the displayed one; hiding must not touch that copy, or a full-run upload
+// would resolve the hidden findings on the platform.
+func TestHideDismissedLeavesUploadCopyIntact(t *testing.T) {
+	dismissed := verdict.Classify(verdict.Input{Secret: "<your-api-key>", Line: `api_key = "<your-api-key>"`, RuleID: "generic-api-key"})
+	rep := scan.NewReport(".", []finding.Finding{
+		secretFinding("a", finding.High, &dismissed),
+		secretFinding("b", finding.High, nil),
+	}, nil)
+	full := rep
+	rep.HideDismissed()
+	if len(rep.Findings) != 1 || len(full.Findings) != 2 || !full.Findings[1].Dismissed() && !full.Findings[0].Dismissed() {
+		t.Errorf("display=%d upload=%d", len(rep.Findings), len(full.Findings))
+	}
+}
