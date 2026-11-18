@@ -25,45 +25,71 @@ inputs:
     description: "If set, also write SARIF to this path (upload it with github/codeql-action/upload-sarif)."
     required: false
     default: ""
+  cli-version:
+    description: >-
+      offload-cli release to download (e.g. v0.2.0). Defaults to the action ref
+      when that is a release tag. Set it when you pin the action to a commit SHA
+      and want the prebuilt binary instead of a source build.
+    required: false
+    default: ""
   upload:
-    description: "Send findings to an Offload Security platform (needs platform-url and api-key). Exit code 4 if the upload fails."
+    description: "Send findings to an Offload Security platform (needs a platform URL and API key). Exit code 4 if the upload fails."
     required: false
     default: "false"
   platform-url:
-    description: "Offload platform URL, e.g. https://offload.example.com"
+    description: "Offload platform URL, e.g. https://offload.example.com. Falls back to an OFFLOAD_URL env var set at job or workflow level."
     required: false
     default: ""
   api-key:
-    description: "Offload CI/CD API key with the scans:trigger scope. Pass it from a secret (e.g. secrets.OFFLOAD_API_KEY), never inline."
+    description: "Offload CI/CD API key with the scans:trigger scope. Pass it from a secret (e.g. secrets.OFFLOAD_API_KEY), never inline. Falls back to an OFFLOAD_API_KEY env var set at job or workflow level."
     required: false
     default: ""
 
 runs:
   using: "composite"
   steps:
-    - name: Install scanner tools
+    - name: Install offload-cli and pinned scanners
       shell: bash
+      env:
+        ACTION_REF: ${{ github.action_ref }}
+        IN_CLI_VERSION: ${{ inputs.cli-version }}
       run: |
         set -euo pipefail
-        # gitleaks, syft, grype, trivy — official install scripts.
-        curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
-        curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
-        curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
-        # gitleaks binary
-        GL_VER=8.24.3
-        curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VER}/gitleaks_${GL_VER}_linux_x64.tar.gz" \
-          | tar -xz -C /tmp gitleaks && sudo mv /tmp/gitleaks /usr/local/bin/
+        case "${RUNNER_OS}" in
+          Linux|macOS) ;;
+          *) echo "::error::offload-cli action supports Linux and macOS runners (got ${RUNNER_OS})"; exit 1 ;;
+        esac
+        bin="${RUNNER_TEMP}/offload-cli/bin"
+        mkdir -p "$bin"
+        echo "$bin" >> "$GITHUB_PATH"
 
-    - name: Build offload-cli
-      shell: bash
-      run: |
-        set -euo pipefail
-        # Build from the action's OWN checked-out source ($GITHUB_ACTION_PATH),
-        # so the CLI always matches the exact action ref the user pinned. This
-        # is deterministic — no floating @main via the module proxy. Build from
-        # inside that dir so Go finds the module (the caller's repo has no go.mod).
-        ( cd "$GITHUB_ACTION_PATH" && go build -o /usr/local/bin/offload . )
-        offload version
+        # Scanners: versions and checksum pins come from scanners.env at this
+        # action ref; every download is verified before use (fail closed).
+        sh "$GITHUB_ACTION_PATH/install.sh" --scanners-only \
+          --scanners-env "$GITHUB_ACTION_PATH/scanners.env" --bin-dir "$bin"
+
+        # The CLI: prefer the checksum-verified release binary that matches the
+        # action ref. github.action_ref can be empty in composite actions, so
+        # fall back to the ref directory name under _actions/<owner>/<repo>/<ref>.
+        semver='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+        if [ -n "$IN_CLI_VERSION" ]; then
+          case "$IN_CLI_VERSION" in v*) ;; *) IN_CLI_VERSION="v$IN_CLI_VERSION" ;; esac
+          if ! [[ "$IN_CLI_VERSION" =~ $semver ]]; then
+            echo "::error::cli-version '${IN_CLI_VERSION}' must be a release tag like v0.2.0"
+            exit 1
+          fi
+        fi
+        ref="${IN_CLI_VERSION:-${ACTION_REF:-$(basename "$GITHUB_ACTION_PATH")}}"
+        if [[ "$ref" =~ $semver ]]; then
+          sh "$GITHUB_ACTION_PATH/install.sh" --version "$ref" --bin-dir "$bin"
+        elif command -v go >/dev/null 2>&1; then
+          echo "::notice::Action ref '${ref}' is not a release tag, so there is no prebuilt binary to download. Building offload-cli from the action source with $(go version)."
+          ( cd "$GITHUB_ACTION_PATH" && CGO_ENABLED=0 go build -trimpath -o "$bin/offload" . )
+        else
+          echo "::error::Action ref '${ref}' is not a release tag (vX.Y.Z), so there is no prebuilt binary, and Go is not installed to build from source. Pin a release tag (offloadsecurity/offload-cli@v0.2.0), set the cli-version input, or add actions/setup-go before this step."
+          exit 1
+        fi
+        "$bin/offload" version
 
     - name: Run Offload scan
       shell: bash
@@ -74,19 +100,30 @@ runs:
         IN_FORMAT: ${{ inputs.format }}
         IN_SARIF: ${{ inputs.sarif-file }}
         IN_UPLOAD: ${{ inputs.upload }}
-        OFFLOAD_URL: ${{ inputs.platform-url }}
-        OFFLOAD_API_KEY: ${{ inputs.api-key }}
+        IN_PLATFORM_URL: ${{ inputs.platform-url }}
+        IN_API_KEY: ${{ inputs.api-key }}
       run: |
         set -euo pipefail
+        # Write SARIF first: the gated run below exits 3 when fail-on is hit,
+        # and the SARIF file must still exist for upload-sarif (if: always()).
+        if [ -n "$IN_SARIF" ]; then
+          offload scan "$IN_PATH" --scanners "$IN_SCANNERS" --format sarif --output "$IN_SARIF"
+        fi
         args=(scan "$IN_PATH" --scanners "$IN_SCANNERS" --format "$IN_FORMAT")
         if [ -n "$IN_FAIL_ON" ]; then args+=(--fail-on "$IN_FAIL_ON"); fi
         if [ "$IN_UPLOAD" = "true" ]; then
+          # Inputs win; otherwise keep OFFLOAD_URL / OFFLOAD_API_KEY inherited
+          # from job or workflow env.
+          if [ -n "$IN_PLATFORM_URL" ]; then export OFFLOAD_URL="$IN_PLATFORM_URL"; fi
+          if [ -n "$IN_API_KEY" ]; then export OFFLOAD_API_KEY="$IN_API_KEY"; fi
           # Secrets are not available to pull requests from forks: say so
           # instead of failing the job.
-          if [ -z "$OFFLOAD_API_KEY" ]; then echo "::warning::upload: api-key is empty (secret not available?); findings were not sent to Offload"
-          else args+=(--upload); fi
+          if [ -z "${OFFLOAD_API_KEY:-}" ]; then
+            echo "::warning::upload: no API key (api-key input or OFFLOAD_API_KEY env; secret not available?); findings were not sent to Offload"
+          elif [ -z "${OFFLOAD_URL:-}" ]; then
+            echo "::warning::upload: no platform URL (platform-url input or OFFLOAD_URL env); findings were not sent to Offload"
+          else
+            args+=(--upload)
+          fi
         fi
         offload "${args[@]}"
-        if [ -n "$IN_SARIF" ]; then
-          offload scan "$IN_PATH" --scanners "$IN_SCANNERS" --format sarif --output "$IN_SARIF" || true
-        fi

@@ -1,0 +1,8 @@
+*
+!go.mod
+!main.go
+!internal/
+!install.sh
+!scanners.env
+!LICENSE
+!NOTICE
