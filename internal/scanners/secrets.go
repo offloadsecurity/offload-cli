@@ -32,6 +32,7 @@ type gitleaksV8 struct {
 	File        string  `json:"File"`
 	StartLine   int     `json:"StartLine"`
 	EndLine     int     `json:"EndLine"`
+	StartColumn int     `json:"StartColumn"`
 	Match       string  `json:"Match"`
 	Secret      string  `json:"Secret"`
 	Commit      string  `json:"Commit"`
@@ -134,6 +135,7 @@ func ParseGitleaksReport(dir string, raw []byte, verdicts bool) ([]finding.Findi
 			File:              relPath(dir, e.File),
 			LineStart:         e.StartLine,
 			LineEnd:           e.EndLine,
+			ColumnStart:       e.StartColumn,
 			Snippet:           redact(e.Secret, e.Match),
 			Tool:              SecretsBinary,
 			SecretVerdict:     sv,

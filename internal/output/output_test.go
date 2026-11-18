@@ -2,6 +2,8 @@ package output
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -169,5 +171,46 @@ func TestNoVerdictsIsRawBehaviour(t *testing.T) {
 	out := render(t, rep)
 	if strings.Contains(out["json"], "secret_verdict") || strings.Contains(out["table"], "dismissed") {
 		t.Errorf("no verdict output expected")
+	}
+}
+
+// Two distinct short secrets from the same rule and file both survive
+// dedupe; scanning the same file again yields the same fingerprints; and no
+// fingerprint is a plain hash of the raw value.
+func TestShortSecretsAreNotCollapsed(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "app.env"), []byte("DB_PASS=Ab3kq9\nAPI_PASS=Zx7mw2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal([]map[string]interface{}{
+		{"RuleID": "generic-api-key", "File": filepath.Join(dir, "app.env"), "StartLine": 1, "EndLine": 1, "StartColumn": 1,
+			"Secret": "Ab3kq9", "Match": "DB_PASS=Ab3kq9"},
+		{"RuleID": "generic-api-key", "File": filepath.Join(dir, "app.env"), "StartLine": 2, "EndLine": 2, "StartColumn": 1,
+			"Secret": "Zx7mw2", "Match": "API_PASS=Zx7mw2"},
+	})
+	scanOnce := func() scan.Report {
+		fs, err := scanners.ParseGitleaksReport(dir, raw, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return scan.NewReport(dir, fs, nil)
+	}
+	first, second := scanOnce(), scanOnce()
+	if len(first.Findings) != 2 || first.Total() != 2 {
+		t.Fatalf("two distinct short secrets must stay two findings, got %d", len(first.Findings))
+	}
+	if first.Findings[0].Fingerprint == first.Findings[1].Fingerprint {
+		t.Errorf("distinct secrets share a fingerprint")
+	}
+	for i := range first.Findings {
+		if first.Findings[i].Fingerprint != second.Findings[i].Fingerprint {
+			t.Errorf("fingerprint not stable across runs: %s vs %s", first.Findings[i].Fingerprint, second.Findings[i].Fingerprint)
+		}
+		for _, v := range []string{"Ab3kq9", "Zx7mw2"} {
+			sum := sha256.Sum256([]byte(v))
+			if strings.HasPrefix(hex.EncodeToString(sum[:]), first.Findings[i].Fingerprint[:12]) {
+				t.Errorf("fingerprint looks like a hash of the raw value")
+			}
+		}
 	}
 }

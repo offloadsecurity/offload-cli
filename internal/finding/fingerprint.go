@@ -3,6 +3,7 @@ package finding
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strconv"
 	"strings"
 )
 
@@ -19,8 +20,19 @@ func Fingerprint(f Finding) string {
 		// package-vuln identity = (cve/advisory id, package name)
 		disc = []string{f.PrimaryIdentifier, f.Package}
 	case CategorySecret:
-		// secret/code identity = (rule id, file path, snippet hash)
-		disc = []string{f.RuleID, f.File, snippetHash(f.Snippet)}
+		// secret identity = (rule id, file path, redacted-snippet hash,
+		// start line, start column). The snippet is redacted (first and last
+		// three characters), so on its own two distinct secrets from the
+		// same rule in the same file can share it (every value of 8 chars or
+		// fewer redacts to "***") and one would be silently deduplicated
+		// away. The position disambiguates them. This is a deliberate
+		// exception to the no-line-numbers rule: it keeps the fingerprint
+		// stable across runs for an unchanged file, and it is never a hash
+		// of the raw secret (a published hash of a short secret could be
+		// brute-forced offline). Editing lines above a secret changes its
+		// fingerprint.
+		disc = []string{f.RuleID, f.File, snippetHash(f.Snippet),
+			strconv.Itoa(f.LineStart), strconv.Itoa(f.ColumnStart)}
 	case CategoryIaC:
 		// iac identity = (check id, file path, resource address)
 		disc = []string{f.RuleID, f.File, f.Resource}

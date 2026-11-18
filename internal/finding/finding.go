@@ -92,8 +92,11 @@ type Finding struct {
 	File      string `json:"file,omitempty"`
 	LineStart int    `json:"line_start,omitempty"`
 	LineEnd   int    `json:"line_end,omitempty"`
-	Snippet   string `json:"code_snippet,omitempty"`
-	Resource  string `json:"resource,omitempty"` // IaC resource address
+	// ColumnStart is the match's start column (secrets only); part of a
+	// secret's fingerprint, see Fingerprint.
+	ColumnStart int    `json:"column_start,omitempty"`
+	Snippet     string `json:"code_snippet,omitempty"`
+	Resource    string `json:"resource,omitempty"` // IaC resource address
 
 	// Software component (SCA / SBOM)
 	Package    string  `json:"package_name,omitempty"`
