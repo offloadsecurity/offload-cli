@@ -12,15 +12,58 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version: "1.21"
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
       - name: Vet
         run: go vet ./...
       - name: Test
         run: go test ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
       - name: Build
         run: go build -o offload .
       - name: Smoke test
         run: ./offload version && ./offload help
+      - name: shellcheck
+        run: shellcheck install.sh scripts/*.sh
+
+  # Exercise the Action itself (pinned, checksum-verified scanner installs and
+  # the source-build fallback, since `uses: ./` is not a release tag) against
+  # a small fixture generated at runtime.
+  action:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.x"
+      - name: Write fixture
+        run: |
+          d="$RUNNER_TEMP/fixture"
+          mkdir -p "$d"
+          # Assembled at runtime so no secret-shaped string lives in the repo.
+          printf 'GITHUB_TOKEN = "%s%s"\n' "ghp_" "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8" > "$d/config.py"
+          printf '%s\n' 'resource "aws_security_group" "open" {' '  ingress {' '    from_port   = 22' '    to_port     = 22' '    protocol    = "tcp"' '    cidr_blocks = ["0.0.0.0/0"]' '  }' '}' > "$d/main.tf"
+          echo "FIXTURE=$d" >> "$GITHUB_ENV"
+      - uses: ./
+        with:
+          path: ${{ env.FIXTURE }}
+          scanners: secrets,iac
+          fail-on: ""
+          sarif-file: ${{ runner.temp }}/offload.sarif
+      - name: Check results
+        run: |
+          offload scan "$FIXTURE" --scanners secrets,iac --format json > "$RUNNER_TEMP/out.json"
+          jq -e '[.scanners[] | select(.status != "ok")] | length == 0' "$RUNNER_TEMP/out.json"
+          jq -e '.summary.total >= 2' "$RUNNER_TEMP/out.json"
+          test -s "$RUNNER_TEMP/offload.sarif"

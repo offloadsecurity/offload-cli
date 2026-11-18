@@ -1,5 +1,6 @@
-# goreleaser configuration — builds cross-platform binaries + checksums and
-# attaches them to the GitHub Release on each pushed tag.
+# goreleaser configuration: builds cross-platform binaries + checksums,
+# signs checksums.txt with keyless cosign, attaches everything to the GitHub
+# Release on each pushed tag, and updates the Homebrew tap when a token is set.
 version: 2
 
 project_name: offload-cli
@@ -14,6 +15,8 @@ builds:
     binary: offload
     env:
       - CGO_ENABLED=0
+    flags:
+      - -trimpath
     ldflags:
       - -s -w -X github.com/offloadsecurity/offload-cli/internal/cli.Version={{ .Version }}
     goos:
@@ -38,6 +41,54 @@ archives:
 
 checksum:
   name_template: "checksums.txt"
+
+# Keyless (Sigstore) signature over checksums.txt, using the release
+# workflow's GitHub OIDC identity. Produces checksums.txt.sigstore.json.
+signs:
+  - id: checksums
+    cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - "--yes"
+
+homebrew_casks:
+  - name: offload-cli
+    ids: [default]
+    binaries: [offload]
+    homepage: "https://github.com/offloadsecurity/offload-cli"
+    description: "Scan a repo for secrets, vulnerable dependencies and IaC misconfigurations"
+    license: "Apache-2.0"
+    directory: Casks
+    repository:
+      owner: offloadsecurity
+      name: homebrew-tap
+      branch: main
+      token: '{{ index .Env "HOMEBREW_TAP_GITHUB_TOKEN" }}'
+    # No token (forks, or before the secret is added): build the cask but
+    # don't push it, instead of failing the release.
+    skip_upload: '{{ if index .Env "HOMEBREW_TAP_GITHUB_TOKEN" }}false{{ else }}true{{ end }}'
+    commit_author:
+      name: offload-release-bot
+      email: noreply@offloadsecurity.com
+    commit_msg_template: "offload-cli {{ .Tag }}"
+    caveats: |
+      offload drives four optional scanners; a missing one is reported as skipped.
+      Install them with:
+        brew install gitleaks syft grype trivy
+      Or use the Docker image, which bundles pinned versions of all four:
+        docker run --rm -v "$PWD:/src" ghcr.io/offloadsecurity/offload-cli scan /src
+    hooks:
+      post:
+        # The binaries are not notarized; clear the quarantine flag so macOS
+        # Gatekeeper does not block the first run.
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/offload"]
+          end
 
 release:
   github:
