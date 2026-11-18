@@ -16,8 +16,9 @@ type sarifLog struct {
 }
 
 type sarifRun struct {
-	Tool    sarifTool     `json:"tool"`
-	Results []sarifResult `json:"results"`
+	Tool       sarifTool              `json:"tool"`
+	Results    []sarifResult          `json:"results"`
+	Properties map[string]interface{} `json:"properties,omitempty"`
 }
 
 type sarifTool struct {
@@ -40,12 +41,12 @@ type sarifRule struct {
 }
 
 type sarifResult struct {
-	RuleID              string            `json:"ruleId"`
-	Level               string            `json:"level"`
-	Message             sarifText         `json:"message"`
-	Locations           []sarifLocation   `json:"locations,omitempty"`
-	PartialFingerprints map[string]string `json:"partialFingerprints,omitempty"`
-	Properties          map[string]string `json:"properties,omitempty"`
+	RuleID              string                 `json:"ruleId"`
+	Level               string                 `json:"level"`
+	Message             sarifText              `json:"message"`
+	Locations           []sarifLocation        `json:"locations,omitempty"`
+	PartialFingerprints map[string]string      `json:"partialFingerprints,omitempty"`
+	Properties          map[string]interface{} `json:"properties,omitempty"`
 }
 
 type sarifText struct {
@@ -119,10 +120,23 @@ func SARIF(w io.Writer, rep scan.Report, version string) error {
 			PartialFingerprints: map[string]string{
 				"offloadFingerprint": f.Fingerprint,
 			},
-			Properties: map[string]string{
+			Properties: map[string]interface{}{
 				"severity": string(f.Severity),
 				"tool":     f.Tool,
 			},
+		}
+		if sv := f.SecretVerdict; sv != nil {
+			res.Properties["secretVerdict"] = sv
+			if t := verdictTag(*sv); t != "" {
+				res.Message.Text += " " + t
+			}
+			if f.Dismissed() {
+				// Dismissed: kept as a note so it stays visible in code
+				// scanning without failing an error-level check. The
+				// scanner's severity stays in properties.severity.
+				res.Level = "note"
+				res.Properties["dismissed"] = true
+			}
 		}
 		// GitHub code scanning requires every result to carry at least one
 		// location. Use the file when we have one; otherwise fall back to the
@@ -161,6 +175,9 @@ func SARIF(w io.Writer, rep scan.Report, version string) error {
 			}},
 			Results: results,
 		}},
+	}
+	if rep.DismissedHidden && rep.Dismissed > 0 {
+		log.Runs[0].Properties = map[string]interface{}{"dismissedHidden": rep.Dismissed}
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")

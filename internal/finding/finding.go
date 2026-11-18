@@ -4,7 +4,11 @@
 // CLI is shaped exactly like one produced by the platform.
 package finding
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/offloadsecurity/offload-cli/internal/verdict"
+)
 
 // Severity is the canonical, lowercase severity vocabulary. It matches
 // backend/core/scanner_kit.normalize_severity in the platform.
@@ -103,6 +107,17 @@ type Finding struct {
 
 	// Provenance
 	Tool string `json:"tool"`
+
+	// SecretVerdict is the heuristic verdict on a secret finding (nil for
+	// other categories, or when verdicts are disabled with --no-verdicts).
+	SecretVerdict *verdict.Result `json:"secret_verdict,omitempty"`
+}
+
+// Dismissed reports whether the secret verdict dismissed this finding
+// (a high-confidence not_a_secret / likely_false_positive). Dismissed
+// findings stay in the report but do not count toward --fail-on.
+func (f Finding) Dismissed() bool {
+	return f.SecretVerdict != nil && f.SecretVerdict.Dismissed()
 }
 
 // New stamps the severity rank and fingerprint, returning a ready finding.

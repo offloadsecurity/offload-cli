@@ -54,6 +54,8 @@ func runScan(args []string) int {
 		failOn    = fs.String("fail-on", "", "exit non-zero if a finding is at or above this severity: critical|high|medium|low")
 		sbomComps = fs.Bool("sbom-components", false, "include the SBOM component inventory as informational findings")
 		noColor   = fs.Bool("no-color", false, "disable ANSI colors")
+		noVerdict = fs.Bool("no-verdicts", false, "disable secret verdicts (raw gitleaks behaviour)")
+		hideDism  = fs.Bool("hide-dismissed", false, "leave findings dismissed as not secrets out of the output (still counted in the summary)")
 	)
 	// Go's flag package stops at the first positional, so `scan . --format json`
 	// would drop the flags. Reorder so all flags precede the path.
@@ -86,7 +88,11 @@ func runScan(args []string) int {
 		Dir:                   dir,
 		Enabled:               enabled,
 		IncludeSBOMComponents: *sbomComps,
+		NoVerdicts:            *noVerdict,
 	})
+	if *hideDism {
+		rep.HideDismissed()
+	}
 
 	w := os.Stdout
 	if *outPath != "" {
@@ -117,21 +123,32 @@ func runScan(args []string) int {
 		return exitUsage
 	}
 
-	// CI gate.
-	if gate != "" {
-		for _, s := range finding.Order {
-			if rep.Counts[s] > 0 && s.AtLeast(gate) {
-				fmt.Fprintf(os.Stderr, "\nfail-on: found %s findings at or above %q — failing.\n", string(s), string(gate))
-				return exitGateHit
-			}
-		}
+	// CI gate. Counts exclude findings a secret verdict dismissed.
+	if s, hit := gateHit(rep, gate); hit {
+		fmt.Fprintf(os.Stderr, "\nfail-on: found %s findings at or above %q — failing.\n", string(s), string(gate))
+		return exitGateHit
 	}
 	return exitOK
 }
 
+// gateHit reports the most severe counted severity at or above gate.
+// Dismissed findings are not in rep.Counts, so they never trip the gate.
+func gateHit(rep scan.Report, gate finding.Severity) (finding.Severity, bool) {
+	if gate == "" {
+		return "", false
+	}
+	for _, s := range finding.Order {
+		if rep.Counts[s] > 0 && s.AtLeast(gate) {
+			return s, true
+		}
+	}
+	return "", false
+}
+
 // boolScanFlags are the scan flags that take no value; used by reorder to know
 // whether the next token is a value or a positional.
-var boolScanFlags = map[string]bool{"sbom-components": true, "no-color": true}
+var boolScanFlags = map[string]bool{"sbom-components": true, "no-color": true,
+	"no-verdicts": true, "hide-dismissed": true}
 
 // reorder moves flags ahead of positional args so stdlib flag parsing (which
 // stops at the first non-flag) sees every flag regardless of where the user

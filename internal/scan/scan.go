@@ -29,6 +29,8 @@ type Options struct {
 	Dir                   string
 	Enabled               map[string]bool
 	IncludeSBOMComponents bool
+	// NoVerdicts disables secret verdicts (raw gitleaks behaviour).
+	NoVerdicts bool
 }
 
 // Report is the aggregated outcome.
@@ -36,15 +38,20 @@ type Report struct {
 	Dir      string
 	Findings []finding.Finding
 	Tools    []scanners.Result
-	Counts   map[finding.Severity]int
+	// Counts tallies counted findings by severity. Findings a secret verdict
+	// dismissed are excluded here (they never trip --fail-on) and tallied in
+	// Dismissed instead.
+	Counts    map[finding.Severity]int
+	Dismissed int
+	// DismissedHidden is set when dismissed findings were removed from
+	// Findings for display (--hide-dismissed). Dismissed still counts them.
+	DismissedHidden bool
 }
 
 // Run executes the enabled scanners and returns an aggregated, deduplicated
 // report. SBOM+SCA run as a pair (SCA consumes the SBOM); secrets and IaC run
 // concurrently alongside.
 func Run(ctx context.Context, opts Options) Report {
-	rep := Report{Dir: opts.Dir, Counts: map[finding.Severity]int{}}
-
 	var (
 		mu       sync.Mutex
 		wg       sync.WaitGroup
@@ -60,7 +67,7 @@ func Run(ctx context.Context, opts Options) Report {
 
 	if opts.Enabled[Secrets] {
 		wg.Add(1)
-		go func() { defer wg.Done(); fs, r := scanners.Secrets(ctx, opts.Dir); collect(fs, r) }()
+		go func() { defer wg.Done(); fs, r := scanners.Secrets(ctx, opts.Dir, !opts.NoVerdicts); collect(fs, r) }()
 	}
 	if opts.Enabled[IaC] {
 		wg.Add(1)
@@ -94,17 +101,52 @@ func Run(ctx context.Context, opts Options) Report {
 	}
 	wg.Wait()
 
+	return NewReport(opts.Dir, findings, tools)
+}
+
+// NewReport deduplicates findings and tallies them into a report. Findings
+// a secret verdict dismissed are tallied in Dismissed, not Counts.
+func NewReport(dir string, findings []finding.Finding, tools []scanners.Result) Report {
+	rep := Report{Dir: dir, Counts: map[finding.Severity]int{}}
 	rep.Findings = dedupe(findings)
 	rep.Tools = tools
 	sort.Slice(rep.Tools, func(i, j int) bool { return rep.Tools[i].Tool < rep.Tools[j].Tool })
 	for _, f := range rep.Findings {
+		if f.Dismissed() {
+			rep.Dismissed++
+			continue
+		}
 		rep.Counts[f.Severity]++
 	}
 	return rep
 }
 
+// Total is the number of findings found, counted and dismissed, including
+// any hidden from display.
+func (r Report) Total() int {
+	n := r.Dismissed
+	for _, c := range r.Counts {
+		n += c
+	}
+	return n
+}
+
+// HideDismissed removes dismissed findings from Findings for display. The
+// Dismissed tally is kept, so the summary still discloses them.
+func (r *Report) HideDismissed() {
+	kept := r.Findings[:0:0]
+	for _, f := range r.Findings {
+		if !f.Dismissed() {
+			kept = append(kept, f)
+		}
+	}
+	r.Findings = kept
+	r.DismissedHidden = true
+}
+
 // dedupe merges findings sharing a fingerprint (same real issue found by more
-// than one tool), keeping the most severe, and sorts most-severe first.
+// than one tool), keeping the most severe, and sorts most-severe first, with
+// findings a secret verdict dismissed listed after all counted ones.
 func dedupe(in []finding.Finding) []finding.Finding {
 	byFP := map[string]finding.Finding{}
 	order := []string{}
@@ -116,8 +158,13 @@ func dedupe(in []finding.Finding) []finding.Finding {
 			continue
 		}
 		// keep the more severe; prefer one that carries a fix
-		if f.Severity.Rank() < existing.Severity.Rank() ||
-			(existing.FixVersion == "" && f.FixVersion != "") {
+		replace := f.Severity.Rank() < existing.Severity.Rank() ||
+			(existing.FixVersion == "" && f.FixVersion != "")
+		// never let a dismissed secret stand in for an actionable one
+		if existing.Dismissed() != f.Dismissed() {
+			replace = !f.Dismissed()
+		}
+		if replace {
 			f.Fingerprint = existing.Fingerprint
 			byFP[existing.Fingerprint] = f
 		}
@@ -127,6 +174,9 @@ func dedupe(in []finding.Finding) []finding.Finding {
 		out = append(out, byFP[fp])
 	}
 	sort.SliceStable(out, func(i, j int) bool {
+		if di, dj := out[i].Dismissed(), out[j].Dismissed(); di != dj {
+			return dj
+		}
 		if out[i].Severity.Rank() != out[j].Severity.Rank() {
 			return out[i].Severity.Rank() < out[j].Severity.Rank()
 		}

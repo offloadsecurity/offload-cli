@@ -30,6 +30,9 @@ SCAN FLAGS:
                       (critical|high|medium|low)
   --sbom-components   include the SBOM component inventory as findings
   --no-color          disable ANSI colors
+  --no-verdicts       disable secret verdicts (raw gitleaks behaviour)
+  --hide-dismissed    leave secrets dismissed as not real out of the output
+                      (the summary still counts them)
 
 EXAMPLES:
   offload scan .
@@ -40,6 +43,11 @@ EXAMPLES:
 Scanners are optional external tools; a missing tool is reported as
 "skipped", never silently treated as zero findings. Install what you need:
   gitleaks (secrets) · syft + grype (SBOM/SCA) · trivy (IaC)
+
+Secret verdicts: each secret finding is classified (placeholder, env
+reference, runtime value, ...). High-confidence "not a secret" findings are
+shown last, tagged with their reason, and do not count toward --fail-on.
+Verdicts are heuristics; --no-verdicts turns them off.
 
 Connect a repository to the Offload platform for org-wide correlation,
 attack-path analysis, and compliance evidence: https://offloadsecurity.com

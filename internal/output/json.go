@@ -10,7 +10,9 @@ import (
 	"github.com/offloadsecurity/offload-cli/internal/scanners"
 )
 
-// jsonReport is the stable JSON envelope. Findings use the unified-finding
+// jsonReport is the stable JSON envelope. Summary severity counts cover
+// counted findings only; "dismissed" counts secret findings a verdict
+// dismissed, and "total" is both together. Findings use the unified-finding
 // shape so downstream consumers see the same schema the platform emits.
 type jsonReport struct {
 	Tool     string            `json:"tool"`
@@ -19,6 +21,9 @@ type jsonReport struct {
 	Summary  map[string]int    `json:"summary"`
 	Tools    []toolStatus      `json:"scanners"`
 	Findings []finding.Finding `json:"findings"`
+	// DismissedHidden: dismissed findings were left out of "findings"
+	// (--hide-dismissed); summary.dismissed still counts them.
+	DismissedHidden bool `json:"dismissed_hidden,omitempty"`
 }
 
 type toolStatus struct {
@@ -31,16 +36,18 @@ type toolStatus struct {
 // JSON writes the report as indented JSON.
 func JSON(w io.Writer, rep scan.Report, version string) error {
 	out := jsonReport{
-		Tool:     "offload-cli",
-		Version:  version,
-		Dir:      rep.Dir,
-		Summary:  map[string]int{},
-		Findings: rep.Findings,
+		Tool:            "offload-cli",
+		Version:         version,
+		Dir:             rep.Dir,
+		Summary:         map[string]int{},
+		Findings:        rep.Findings,
+		DismissedHidden: rep.DismissedHidden,
 	}
 	for _, s := range finding.Order {
 		out.Summary[string(s)] = rep.Counts[s]
 	}
-	out.Summary["total"] = len(rep.Findings)
+	out.Summary["dismissed"] = rep.Dismissed
+	out.Summary["total"] = rep.Total()
 	for _, t := range rep.Tools {
 		out.Tools = append(out.Tools, toStatus(t))
 	}

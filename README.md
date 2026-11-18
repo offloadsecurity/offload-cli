@@ -35,6 +35,28 @@ Summary: 2 critical  6 high  5 medium  2 low  (15 total)
 
 Results from every tool are **deduplicated by a scanner-independent fingerprint** and merged into one severity-ranked stream — so the same issue found by two tools shows up once. Output as a **table**, **JSON**, or **SARIF 2.1.0** for GitHub code scanning.
 
+## Secret verdicts
+
+A secrets pattern that matches `password` also matches `password = login_data.password` or `--password="${DB_PASS}"`, neither of which puts a credential in source. `offload scan` classifies every gitleaks finding before redacting it and attaches a **verdict** (`likely_secret`, `likely_false_positive` or `not_a_secret`), a **confidence**, the **signals** that fired and a one-line **reason**:
+
+```
+HIGH     Detected a Generic API Key…
+         app/settings.py:2
+
+Dismissed as not secrets (heuristic verdicts; not counted toward --fail-on):
+CRITICAL Uncovered a GitHub Personal Access Token… [likely false positive: fails token checksum]
+         app/client.ts:1
+HIGH     Detected a Generic API Key… [not a secret: runtime value]
+         app/client.ts:2
+
+Summary: 1 high  (1 counted)  2 dismissed as not secrets
+```
+
+- Only a **high-confidence** non-secret verdict dismisses a finding: placeholders, env/secret-store references, runtime expressions, code handling a variable, hashed values, GitHub/npm tokens that fail their built-in checksum. A hardcoded literal that merely looks weak (`password = "admin"`) stays a secret.
+- Dismissed findings are **kept**: listed after the real ones, counted in the summary, and excluded from `--fail-on`. JSON carries the verdict as `secret_verdict` (with `summary.dismissed`); SARIF carries it in `properties.secretVerdict` and reports dismissed results at level `note`.
+- `--hide-dismissed` leaves them out of the output (the summary still counts them); `--no-verdicts` restores raw gitleaks behaviour.
+- Verdicts are **heuristics**, not proof: always check the reason. Reasons mask the matched value rather than quote it. gitleaks' own allowlists already drop many placeholders, so verdicts mostly act on what gets past them.
+
 ## Install
 
 `offload-cli` orchestrates external scanner binaries — install the ones you want; a missing tool is reported as **skipped**, never silently treated as zero findings.
