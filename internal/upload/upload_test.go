@@ -498,7 +498,7 @@ func TestFromJSON(t *testing.T) {
 	if err != nil || len(in.Findings) != 1 || in.Tools[0].Status != StatusOK {
 		t.Fatalf("in=%+v err=%v", in, err)
 	}
-	for _, bad := range []string{`{"tool":"other"}`, `not json`, `{"tool":"offload-cli","scanners":[{"name":"x","status":"weird"}]}`} {
+	for _, bad := range []string{`{"tool":"other"}`, `not json`, `{"tool":"offload-cli","dismissed_hidden":true,"scanners":[]}`, `{"tool":"offload-cli","scanners":[{"name":"x","status":"weird"}]}`} {
 		if _, err := FromJSON(strings.NewReader(bad)); err == nil {
 			t.Errorf("accepted %s", bad)
 		}

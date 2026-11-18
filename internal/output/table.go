@@ -7,6 +7,7 @@ import (
 
 	"github.com/offloadsecurity/offload-cli/internal/finding"
 	"github.com/offloadsecurity/offload-cli/internal/scan"
+	"github.com/offloadsecurity/offload-cli/internal/verdict"
 )
 
 // ANSI colors, disabled when not writing to a TTY / when NO_COLOR is set.
@@ -60,15 +61,29 @@ func Table(w io.Writer, rep scan.Report, color bool) {
 		}
 	}
 
-	if len(rep.Findings) == 0 {
+	if len(rep.Findings) == 0 && rep.Dismissed == 0 {
 		fmt.Fprintf(w, "\n%s✓ No findings.%s\n\n", p.grn, p.reset)
 		return
 	}
 
 	fmt.Fprintln(w)
+	headed := false
 	for _, f := range rep.Findings {
 		c := sevColor(p, f.Severity)
-		fmt.Fprintf(w, "%s%-8s%s %s%s%s\n", c, strings.ToUpper(string(f.Severity)), p.reset, p.bold, f.Title, p.reset)
+		tag := ""
+		if f.SecretVerdict != nil {
+			if t := verdictTag(*f.SecretVerdict); t != "" {
+				tag = " " + p.dim + t + p.reset
+			}
+		}
+		if f.Dismissed() {
+			if !headed {
+				headed = true
+				fmt.Fprintf(w, "\n%sDismissed as not secrets (heuristic verdicts; not counted toward --fail-on):%s\n", p.dim, p.reset)
+			}
+			c = p.dim
+		}
+		fmt.Fprintf(w, "%s%-8s%s %s%s%s%s\n", c, strings.ToUpper(string(f.Severity)), p.reset, p.bold, f.Title, p.reset, tag)
 		loc := location(f)
 		if loc != "" {
 			fmt.Fprintf(w, "         %s%s%s\n", p.dim, loc, p.reset)
@@ -86,7 +101,36 @@ func Table(w io.Writer, rep scan.Report, color bool) {
 			parts = append(parts, fmt.Sprintf("%s%d %s%s", sevColor(p, s), n, s, p.reset))
 		}
 	}
-	fmt.Fprintf(w, "%s  (%d total)\n\n", strings.Join(parts, "  "), len(rep.Findings))
+	counted := rep.Total() - rep.Dismissed
+	switch {
+	case len(parts) == 0:
+		fmt.Fprintf(w, "%sno counted findings%s", p.grn, p.reset)
+	case rep.Dismissed == 0:
+		fmt.Fprintf(w, "%s  (%d total)", strings.Join(parts, "  "), counted)
+	default:
+		fmt.Fprintf(w, "%s  (%d counted)", strings.Join(parts, "  "), counted)
+	}
+	if rep.Dismissed > 0 {
+		hidden := ""
+		if rep.DismissedHidden {
+			hidden = ", hidden"
+		}
+		fmt.Fprintf(w, "  %s%d dismissed as not secrets%s%s", p.dim, rep.Dismissed, hidden, p.reset)
+	}
+	fmt.Fprint(w, "\n\n")
+}
+
+// verdictTag is the short label shown next to a secret finding, e.g.
+// "[not a secret: placeholder]". A likely_secret verdict gets no tag; a
+// medium-confidence non-secret verdict is flagged for review, not dismissed.
+func verdictTag(v verdict.Result) string {
+	switch {
+	case v.Dismissed():
+		return "[" + strings.ToLower(v.Label) + ": " + v.Tag() + "]"
+	case v.NonSecret():
+		return "[review: " + v.Tag() + "]"
+	}
+	return ""
 }
 
 func location(f finding.Finding) string {

@@ -58,6 +58,8 @@ func runScan(args []string) int {
 		failOn    = fs.String("fail-on", "", "exit non-zero if a finding is at or above this severity: critical|high|medium|low")
 		sbomComps = fs.Bool("sbom-components", false, "include the SBOM component inventory as informational findings")
 		noColor   = fs.Bool("no-color", false, "disable ANSI colors")
+		noVerdict = fs.Bool("no-verdicts", false, "disable secret verdicts (raw gitleaks behaviour)")
+		hideDism  = fs.Bool("hide-dismissed", false, "leave findings dismissed as not secrets out of the output (still counted in the summary)")
 		doUpload  = fs.Bool("upload", false, "send findings to the Offload platform (OFFLOAD_URL, OFFLOAD_API_KEY)")
 	)
 	uf := addUploadFlags(fs)
@@ -101,7 +103,12 @@ func runScan(args []string) int {
 		Dir:                   dir,
 		Enabled:               enabled,
 		IncludeSBOMComponents: *sbomComps,
+		NoVerdicts:            *noVerdict,
 	})
+	full := rep // upload always sends every finding, hidden or not
+	if *hideDism {
+		rep.HideDismissed()
+	}
 
 	w := os.Stdout
 	if *outPath != "" {
@@ -134,29 +141,40 @@ func runScan(args []string) int {
 
 	// Upload runs before the gate so findings reach the platform even when
 	// the gate fails the job; a failed upload never hides the gate result.
+	// It sends the full report: --hide-dismissed only affects display, and a
+	// full-run upload missing dismissed findings would resolve them.
 	uploadFailed := false
 	if upCfg != nil {
 		abs, _ := filepath.Abs(dir)
-		uploadFailed = upload.Run(stderr, upCfg, upload.FromReport(rep), uf.target(abs), Version) != nil
+		uploadFailed = upload.Run(stderr, upCfg, upload.FromReport(full), uf.target(abs), Version) != nil
 	}
 
-	// CI gate.
-	gateHit := false
-	if gate != "" {
-		for _, s := range finding.Order {
-			if rep.Counts[s] > 0 && s.AtLeast(gate) {
-				fmt.Fprintf(os.Stderr, "\nfail-on: found %s findings at or above %q — failing.\n", string(s), string(gate))
-				gateHit = true
-				break
-			}
+	// CI gate. Counts exclude findings a secret verdict dismissed.
+	sev, hit := gateHit(rep, gate)
+	if hit {
+		fmt.Fprintf(os.Stderr, "\nfail-on: found %s findings at or above %q — failing.\n", string(sev), string(gate))
+	}
+	return finalExit(hit, uploadFailed)
+}
+
+// gateHit reports the most severe counted severity at or above gate.
+// Dismissed findings are not in rep.Counts, so they never trip the gate.
+func gateHit(rep scan.Report, gate finding.Severity) (finding.Severity, bool) {
+	if gate == "" {
+		return "", false
+	}
+	for _, s := range finding.Order {
+		if rep.Counts[s] > 0 && s.AtLeast(gate) {
+			return s, true
 		}
 	}
-	return finalExit(gateHit, uploadFailed)
+	return "", false
 }
 
 // boolScanFlags are the scan flags that take no value; used by reorder to know
 // whether the next token is a value or a positional.
-var boolScanFlags = map[string]bool{"sbom-components": true, "no-color": true, "upload": true}
+var boolScanFlags = map[string]bool{"sbom-components": true, "no-color": true, "upload": true,
+	"no-verdicts": true, "hide-dismissed": true}
 
 // reorder moves flags ahead of positional args so stdlib flag parsing (which
 // stops at the first non-flag) sees every flag regardless of where the user

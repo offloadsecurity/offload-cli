@@ -50,3 +50,28 @@ func TestFingerprintCategoriesDiffer(t *testing.T) {
 		t.Errorf("distinct categories must not collide")
 	}
 }
+
+// Two distinct short secrets redact to the same snippet; their position must
+// keep them apart, and the fingerprint must never be a hash of the raw value.
+func TestSecretFingerprintDisambiguatesByPosition(t *testing.T) {
+	base := Finding{Category: CategorySecret, RuleID: "generic-api-key", File: "a.env", Snippet: "***"}
+	at := func(line, col int) string {
+		f := base
+		f.LineStart, f.ColumnStart = line, col
+		return New(f).Fingerprint
+	}
+	cases := []struct {
+		name string
+		a, b string
+		same bool
+	}{
+		{"different lines", at(1, 5), at(2, 5), false},
+		{"same line, different columns", at(1, 5), at(1, 30), false},
+		{"same position (rescan)", at(3, 7), at(3, 7), true},
+	}
+	for _, c := range cases {
+		if (c.a == c.b) != c.same {
+			t.Errorf("%s: same=%v want %v", c.name, c.a == c.b, c.same)
+		}
+	}
+}

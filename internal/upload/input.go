@@ -55,6 +55,8 @@ type jsonReport struct {
 	Dir      string            `json:"scanned_path"`
 	Tools    []ToolRun         `json:"scanners"`
 	Findings []finding.Finding `json:"findings"`
+	// DismissedHidden: written with --hide-dismissed, so findings are missing.
+	DismissedHidden bool `json:"dismissed_hidden"`
 }
 
 // FromJSON reads a report written by `offload scan --format json`.
@@ -66,6 +68,12 @@ func FromJSON(r io.Reader) (Input, error) {
 	}
 	if rep.Tool != "offload-cli" {
 		return Input{}, fmt.Errorf("not an offload JSON report (tool=%q); write one with `offload scan --format json --output results.json`", rep.Tool)
+	}
+	if rep.DismissedHidden {
+		// A full-run upload resolves every finding it does not carry, so a
+		// report missing its dismissed findings would resolve them.
+		return Input{}, fmt.Errorf("this report was written with --hide-dismissed, so dismissed findings are missing " +
+			"and uploading it would resolve them on the platform; write it again without --hide-dismissed")
 	}
 	for _, t := range rep.Tools {
 		switch t.Status {

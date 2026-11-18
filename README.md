@@ -156,6 +156,8 @@ offload scan . --fail-on high                   # exit 3 if any finding ≥ high
 | `--fail-on` | exit `3` if a finding is ≥ this severity (`critical`\|`high`\|`medium`\|`low`) | never fail |
 | `--sbom-components` | include the SBOM component inventory as findings | off |
 | `--no-color` | disable ANSI colors | off |
+| `--no-verdicts` | disable [secret verdicts](#secret-verdicts) (raw gitleaks behaviour) | verdicts on |
+| `--hide-dismissed` | leave secrets dismissed as not real out of the output (still counted) | shown |
 
 **Exit codes:** `0` success · `2` usage error · `3` `--fail-on` threshold hit · `4` upload failed (see below).
 
@@ -202,6 +204,28 @@ If you pin the Action to a commit SHA or a branch instead of a release tag, ther
 
 <!-- Feature sections (e.g. "Secret verdicts", "Send results to Offload") go below this line. -->
 
+## Secret verdicts
+
+A secrets pattern that matches `password` also matches `password = login_data.password` or `--password="${DB_PASS}"`, neither of which puts a credential in source. `offload scan` classifies every gitleaks finding before redacting it and attaches a **verdict** (`likely_secret`, `likely_false_positive` or `not_a_secret`), a **confidence**, the **signals** that fired and a one-line **reason**:
+
+```
+CRITICAL Uncovered a GitHub Personal Access Token… [review: fails token checksum]
+         app/client.ts:1
+HIGH     Detected a Generic API Key…
+         app/settings.py:2
+
+Dismissed as not secrets (heuristic verdicts; not counted toward --fail-on):
+HIGH     Detected a Generic API Key… [not a secret: runtime value]
+         app/client.ts:2
+
+Summary: 1 critical  1 high  (2 counted)  1 dismissed as not secrets
+```
+
+- Only a **high-confidence** non-secret verdict dismisses a finding: placeholders, env/secret-store references, runtime expressions, code handling a variable, hashed values. A hardcoded literal that merely looks weak (`password = "admin"`) stays a secret, and a generated-looking value is never dismissed because of its variable name or a nearby word like `example`. Weaker evidence, such as a GitHub/npm token failing its built-in checksum, is tagged `[review: …]` and still counts.
+- Dismissed findings are **kept**: listed after the real ones, counted in the summary, and excluded from `--fail-on`. JSON carries the verdict as `secret_verdict` (with `summary.dismissed`); SARIF carries it in `properties.secretVerdict` and reports dismissed results at level `note`.
+- `--hide-dismissed` leaves them out of the output (the summary still counts them); `--no-verdicts` restores raw gitleaks behaviour. `--upload` always sends every finding, dismissed ones included, at the scanner's severity, so the platform applies its own verdicts; `offload upload` refuses a JSON report written with `--hide-dismissed`.
+- Verdicts are **heuristics**, not proof: always check the reason. Reasons describe the value by a mask and never quote the source line. gitleaks' own allowlists already drop many placeholders, so verdicts mostly act on what gets past them.
+
 ## Send results to Offload
 
 `--upload` sends the findings to your Offload Security platform through its SARIF import (`POST /api/cicd/sarif/upload`), so they show up in **Code Command Center → SARIF Imports** next to your other code findings.
@@ -229,7 +253,7 @@ In the GitHub Action, add `upload: true`, `platform-url: ${{ vars.OFFLOAD_URL }}
 
 ## The finding model
 
-Every finding carries a stable `finding_fingerprint` (SHA-256 over category + identity, **excluding** tool, severity, and line numbers), a canonical lowercase `severity` (`critical`→`info`), and the software component or file it belongs to. This is the same shape the Offload platform uses, so local results line up with what you see once a repo is connected.
+Every finding carries a stable `finding_fingerprint` (SHA-256 over category + identity, **excluding** tool, severity, and line numbers; secrets are the one exception and include their position, so two short secrets whose redacted snippets match are never merged), a canonical lowercase `severity` (`critical`→`info`), and the software component or file it belongs to. This is the same shape the Offload platform uses, so local results line up with what you see once a repo is connected.
 
 ## From local scan to a governed program
 

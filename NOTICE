@@ -37,6 +37,34 @@ their own licenses, and the offload binary is built with the Go toolchain
 The GitHub Action and install.sh (with --with-scanners) download the same
 official release binaries from each project's GitHub Releases at install time.
 
+------------------------------------------------------------------------------
+Bundled third-party material
+------------------------------------------------------------------------------
+
+internal/verdict/stopwords.go contains the stopword list of the
+generic-api-key rule from the Gitleaks default configuration
+(config/gitleaks.toml), used under the MIT License:
+
+  Copyright (c) 2019 Zachary Rice
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in
+  all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
 offload-cli and Offload Security are not affiliated with, sponsored by, or
 endorsed by Anchore, Aqua Security, or the Gitleaks project. Product and tool
 names are used nominatively, only to describe interoperability. All trademarks
