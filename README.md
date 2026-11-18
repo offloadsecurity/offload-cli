@@ -68,7 +68,32 @@ offload scan . --fail-on high                   # exit 3 if any finding ≥ high
 | `--sbom-components` | include the SBOM component inventory as findings | off |
 | `--no-color` | disable ANSI colors | off |
 
-**Exit codes:** `0` success · `2` usage error · `3` `--fail-on` threshold hit.
+**Exit codes:** `0` success · `2` usage error · `3` `--fail-on` threshold hit · `4` upload failed (see below).
+
+## Send results to Offload
+
+`--upload` sends the findings to your Offload Security platform through its SARIF import (`POST /api/cicd/sarif/upload`), so they show up in **Code Command Center → SARIF Imports** next to your other code findings.
+
+1. In the platform, open your profile menu → **API Keys** → **Create API Key**, and pick the **CI/CD Pipeline** scope preset (it includes the `scans:trigger` scope the upload needs). The key's owner also needs the Run Scans permission.
+2. Run:
+
+```bash
+export OFFLOAD_URL=https://offload.example.com
+export OFFLOAD_API_KEY=osk_...            # from a CI secret; never passed as a flag
+offload scan . --upload --fail-on high
+
+offload scan . --format json --output results.json
+offload upload results.json               # or send a saved JSON report later
+```
+
+- The repository, branch and commit are read from GitHub Actions' environment or from `git` (`remote get-url origin`, the current branch, `HEAD`); override them with `--repository`, `--branch`, `--default-branch` and `--commit`.
+- Each scanner is sent as its own run. When the branch is known, the upload is a full run, so findings that scanner no longer reports on that branch are resolved on the platform. A **skipped** scanner is not sent, so nothing is resolved on its behalf. If the branch is unknown, the upload is partial and nothing is resolved; the CLI prints a warning when this happens.
+- Secrets are sent as the rule, file and line only, never the matched text. SBOM component entries (`--sbom-components`) are not uploaded.
+- TLS is always verified. For a private CA, set `OFFLOAD_CA_CERT=/path/to/ca.pem`. Plain `http://` is refused except to localhost.
+- 429 and 5xx responses are retried a bounded number of times. If the combined upload is too large it is resent as one upload per scanner, and if a single scanner's upload is still too large the CLI fails and prints its count. Nothing is truncated.
+- Exit codes: if `--fail-on` is hit the exit code is `3`, even when the upload also failed. If only the upload failed it is `4`. The upload runs before the gate, so findings are sent even when the gate fails the job.
+
+In the GitHub Action, add `upload: true`, `platform-url: ${{ vars.OFFLOAD_URL }}` and `api-key: ${{ secrets.OFFLOAD_API_KEY }}`. When the secret is unavailable, for example on pull requests from forks, the Action prints a warning and skips the upload.
 
 ## GitHub Action
 

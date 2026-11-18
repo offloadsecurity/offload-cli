@@ -5,11 +5,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/offloadsecurity/offload-cli/internal/finding"
 	"github.com/offloadsecurity/offload-cli/internal/output"
 	"github.com/offloadsecurity/offload-cli/internal/scan"
+	"github.com/offloadsecurity/offload-cli/internal/upload"
 )
 
 // Version is stamped at build time via -ldflags "-X …cli.Version=vX.Y.Z".
@@ -32,6 +34,8 @@ func Run(args []string) int {
 	switch args[0] {
 	case "scan":
 		return runScan(args[1:])
+	case "upload":
+		return runUpload(args[1:])
 	case "version", "--version", "-v":
 		fmt.Println("offload-cli " + Version)
 		return exitOK
@@ -54,7 +58,9 @@ func runScan(args []string) int {
 		failOn    = fs.String("fail-on", "", "exit non-zero if a finding is at or above this severity: critical|high|medium|low")
 		sbomComps = fs.Bool("sbom-components", false, "include the SBOM component inventory as informational findings")
 		noColor   = fs.Bool("no-color", false, "disable ANSI colors")
+		doUpload  = fs.Bool("upload", false, "send findings to the Offload platform (OFFLOAD_URL, OFFLOAD_API_KEY)")
 	)
+	uf := addUploadFlags(fs)
 	// Go's flag package stops at the first positional, so `scan . --format json`
 	// would drop the flags. Reorder so all flags precede the path.
 	if err := fs.Parse(reorder(args)); err != nil {
@@ -80,6 +86,15 @@ func runScan(args []string) int {
 	var gate finding.Severity
 	if *failOn != "" {
 		gate = finding.NormalizeSeverity(*failOn)
+	}
+
+	// Validate the upload configuration before spending time on a scan.
+	var upCfg *upload.Config
+	if *doUpload {
+		if upCfg, err = upload.NewConfig(*uf.platformURL, envLookup); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return exitUsage
+		}
 	}
 
 	rep := scan.Run(context.Background(), scan.Options{
@@ -117,21 +132,31 @@ func runScan(args []string) int {
 		return exitUsage
 	}
 
+	// Upload runs before the gate so findings reach the platform even when
+	// the gate fails the job; a failed upload never hides the gate result.
+	uploadFailed := false
+	if upCfg != nil {
+		abs, _ := filepath.Abs(dir)
+		uploadFailed = upload.Run(stderr, upCfg, upload.FromReport(rep), uf.target(abs), Version) != nil
+	}
+
 	// CI gate.
+	gateHit := false
 	if gate != "" {
 		for _, s := range finding.Order {
 			if rep.Counts[s] > 0 && s.AtLeast(gate) {
 				fmt.Fprintf(os.Stderr, "\nfail-on: found %s findings at or above %q — failing.\n", string(s), string(gate))
-				return exitGateHit
+				gateHit = true
+				break
 			}
 		}
 	}
-	return exitOK
+	return finalExit(gateHit, uploadFailed)
 }
 
 // boolScanFlags are the scan flags that take no value; used by reorder to know
 // whether the next token is a value or a positional.
-var boolScanFlags = map[string]bool{"sbom-components": true, "no-color": true}
+var boolScanFlags = map[string]bool{"sbom-components": true, "no-color": true, "upload": true}
 
 // reorder moves flags ahead of positional args so stdlib flag parsing (which
 // stops at the first non-flag) sees every flag regardless of where the user
