@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Verdict uses the Offload platform's verdict vocabulary. (confirmed_secret,
@@ -157,7 +158,8 @@ func Classify(in Input) (res Result) {
 	if res.Actionable || !res.NonSecret() {
 		// Anything a reviewer will act on is redacted: the raw inputs and the
 		// value the classifier judged are masked, quoted literals stubbed.
-		res.Reason = stubLiterals(maskValues(res.Reason, in.Secret, in.Match, judged), true)
+		// Backtick spans are the reason's own quoting (masks, words): kept.
+		res.Reason = stubLiterals(maskValues(res.Reason, in.Secret, in.Match, judged), false)
 	} else {
 		// Even a dismissal never quotes the scanner's raw value: a verdict
 		// is a heuristic, and output must not carry a credential if it is
@@ -220,7 +222,11 @@ func classify(in Input) Result {
 		return result(NotASecret, 0.92, "Value is an SSH public key, not a private credential.",
 			[]string{"public_key_material"}, ctx)
 	}
-	nameOnly := (!keyMaterial(value) || publicKeyNameRe.MatchString(key)) && !secretIDKeyRe.MatchString(key)
+	// A secret_id holding key material is a credential (Vault AppRole); one
+	// holding a name (Secrets Manager "prod/db/credentials") is not.
+	secretID := secretIDKeyRe.MatchString(key) &&
+		(keyMaterial(value) || uuidRe.MatchString(value) || (hexRe.MatchString(value) && len(value) >= 32))
+	nameOnly := (!keyMaterial(value) || publicKeyNameRe.MatchString(key)) && !secretID
 	if key != "" && generic && nameOnly && (nonSecretKeyRe.MatchString(key) || idKeyRe.MatchString(key)) {
 		return result(NotASecret, 0.9, fmt.Sprintf("`%s` names a non-secret (an identifier, version, path, "+
 			"public key, endpoint or setting), not a credential.", describeName(key)), []string{"non_secret_key_name"}, ctx)
@@ -322,6 +328,13 @@ func classify(in Input) Result {
 			"value follows it on that line."), ks, ctx)
 	case "placeholder":
 		varied := hasDigit(value) && hasAlpha(value) && highEntropyValue(value)
+		if contains(ks, "placeholder_marker_in_value") && varied && hasLower(value) && hasUpper(value) &&
+			utf8.RuneCountInString(value) >= 20 {
+			// a long generated-looking value that merely contains a marker
+			// word ("q8Xk…-example-…") is not dismissed on the word
+			return result(LikelyFalsePositive, 0.65, fmt.Sprintf("Value contains a placeholder word but is long and "+
+				"generated-looking (`%s`); it may still be a real credential. Review.", shown), ks, ctx)
+		}
 		if passwordRule && ((contains(ks, "placeholder_value") && (!structuralPlaceholderRe.MatchString(value) || varied)) ||
 			contains(ks, "placeholder_marker_in_value")) {
 			// password = "changeme" / "changeme9" / "your_Zx9kq2Lmw": a default
@@ -340,7 +353,7 @@ func classify(in Input) Result {
 	}
 
 	// Look-alikes a generic pattern trips on.
-	if generic && nonSecretValueRe.MatchString(value) {
+	if generic && nonSecretValue(value, passwordRule) {
 		return result(NotASecret, 0.88, "Value is a resource identifier or a file path (an ARN, a key alias or a "+
 			"path to key material), not the credential itself.", []string{"non_secret_value"}, ctx)
 	}
@@ -386,8 +399,13 @@ func classify(in Input) Result {
 		// is weak evidence: a real key often sits next to "# TODO: move to
 		// vault". Medium confidence, still counted.
 		score, why := 0.8, "The line marks this as an example or non-credential (`%s`)."
-		if !contextBanlistRe.MatchString(value) {
+		switch {
+		case !contextBanlistRe.MatchString(value):
 			score, why = 0.65, "The line mentions `%s`, but not in the value itself; it may still be a real credential. Review."
+		case passwordRule || highEntropyValue(value) || keyMaterial(value):
+			// inside the value, but a password or a generated-looking value
+			// may still be real ("Fake-Summer2024!"): medium, still counted
+			score, why = 0.65, "The value contains `%s`, but it may still be a real credential. Review."
 		}
 		return result(LikelyFalsePositive, score, fmt.Sprintf(why, clip(m[1], 20)), []string{"context_banlist_word"}, ctx)
 	}

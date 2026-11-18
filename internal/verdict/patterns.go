@@ -85,13 +85,20 @@ var publicKeyNameRe = re(`(?i)pub(?:lic)?[_.-]?(?:key|token)|verif(?:y|ication)[
 // never an identifier.
 var secretIDKeyRe = re(`(?i)secret[_.-]?ids?$`)
 
-// publicSSHKeyRe: an SSH/ECDSA public key value.
-var publicSSHKeyRe = re(`^(?:ssh-(?:rsa|dss|ed25519|ed448)|ecdsa-sha2-[\w-]+|sk-(?:ssh|ecdsa)-[\w@.-]+)\s+AAAA[A-Za-z0-9+/=]+`)
+// publicSSHKeyRe: an SSH/ECDSA public key value. The wire format starts with
+// the key type, so a real key's base64 blob has a type-specific prefix; a
+// bare "AAAA" is not enough.
+var publicSSHKeyRe = re(`^(?:ssh-rsa\s+AAAAB3NzaC1yc2E|ssh-dss\s+AAAAB3NzaC1kc3M|ssh-ed25519\s+AAAAC3NzaC1lZDI1NTE5|` +
+	`ecdsa-sha2-nistp\d+\s+AAAAE2VjZHNhLXNoYTItbmlzdHA)[A-Za-z0-9+/=]*(?:\s|$)`)
 
-// nonSecretValueRe: locators, not credentials: cloud ARNs, key aliases and
-// paths to key material.
-var nonSecretValueRe = re(`^(?:arn:aws[\w-]*:[\w-]+:|alias/[\w/.-]+$|(?:~|\.{1,2})?/[\w ./-]+$|` +
-	`[\w.-]+(?:/[\w.-]+)+\.(?:pem|key|pub|crt|cer|der|p12|pfx|jks|json|txt|asc|gpg)$)`)
+// arnRe: a real ARN (arn:partition:service:region:account-or-empty:resource).
+var arnRe = re(`^arn:aws[\w-]*:[a-z0-9-]+:[a-z0-9-]*:(?:\d{12})?:`)
+
+// locatorRe: a key alias or a path to key material (see nonSecretValue).
+var locatorRe = re(`^(?:alias/[\w/.-]+|(?:~|\.{1,2})?/[\w ./-]+|` +
+	`[\w.-]+(?:/[\w.-]+)+\.(?:pem|key|pub|crt|cer|der|p12|pfx|jks|json|txt|asc|gpg))$`)
+
+var segmentSepRe = re(`[/:]`)
 
 // pemJointRe: joints left by a PEM block written as concatenated literals.
 var pemJointRe = re("[\"'`]\\s*(?:\\+|\\.{1,2}|&|~)\\s*[\"'`]")

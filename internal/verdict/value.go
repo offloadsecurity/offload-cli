@@ -39,6 +39,34 @@ func mask(value string) string {
 	return string(r[:2]) + "…" + string(r[len(r)-2:]) + " (" + n + " chars)"
 }
 
+// nonSecretValue: a locator rather than a credential: a real ARN, a key alias
+// or a path to key material. Never under a password rule (password =
+// "/Summer2024" is a password), and never when a segment is itself key
+// material: a base64 secret can start with "/", and anything can be prefixed
+// with "alias/".
+func nonSecretValue(v string, passwordRule bool) bool {
+	if passwordRule {
+		return false
+	}
+	if arnRe.MatchString(v) {
+		return true
+	}
+	if !locatorRe.MatchString(v) {
+		return false
+	}
+	for _, seg := range segmentSepRe.Split(v, -1) {
+		stem := seg
+		if i := strings.LastIndexByte(seg, '.'); i > 0 {
+			stem = seg[:i]
+		}
+		if stem != "" && (looksGenerated(stem) || highEntropyValue(stem) ||
+			(utf8.RuneCountInString(stem) >= 20 && ShannonEntropy(stem) >= 3.5)) {
+			return false
+		}
+	}
+	return true
+}
+
 // keyMaterial: a bare token that could be key material in any case:
 // generated-looking, or 20+ characters with entropy >= 3.5. Pure hex and
 // UUIDs are excluded (the usual shape of identifiers under id-style names; a
@@ -50,7 +78,7 @@ func keyMaterial(v string) bool {
 	if looksGenerated(v) {
 		return true
 	}
-	if hexRe.MatchString(v) || uuidRe.MatchString(v) || nonSecretValueRe.MatchString(v) {
+	if hexRe.MatchString(v) || uuidRe.MatchString(v) || nonSecretValue(v, false) {
 		return false
 	}
 	for _, rx := range formatPlaceholderRes {

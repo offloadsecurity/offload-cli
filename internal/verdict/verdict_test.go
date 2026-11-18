@@ -779,3 +779,41 @@ func TestExtractStripsTrailingComment(t *testing.T) {
 		}
 	}
 }
+
+// Third review round.
+func TestReviewRound3(t *testing.T) {
+	const gen = "q8Xk9mP2qR7vT4wZ8nB3cF6hJ1aL5s"
+	counted := func(r Result) bool { return r.Actionable && !suppressed(r) }
+	for _, c := range []struct{ key, value, rule string }{
+		{"aws_secret_access_key", "/" + gen + "Wq9Yt2Zb4", "generic-api-key"}, // base64 secret starting with "/"
+		{"secret", "/Xk9mP2qR7vT4wZ8nB3c/F6hJ1aL5sWq9Yt2Zb4dE", "generic-api-key"},
+		{"password", "/Summer2024", "generic-password"},
+		{"password", "./Passw0rd-x", "generic-password"},
+		{"api_key", "alias/" + gen, "generic-api-key"},
+		{"token", "arn:aws:x:" + gen, "generic-api-key"},
+		{"password", "arn:aws:Summer2024", "generic-password"},
+		{"api_key", "q8Xk9mP2qR7vT4/wZ8nB3cF6hJ1aL5s.key", "generic-api-key"},
+		{"client_secret", "abc/" + gen + ".json", "generic-api-key"},
+		{"password", "ssh-rsa AAAA" + gen, "generic-password"}, // no rsa wire prefix
+		{"api_key", "q8Xk9mP2qR7vT4-example-wZ8nB3cF6hJ1aL5s", "generic-api-key"},
+		{"api_key", "sk_live_q8Xk9mP2qR7vT4wZ8nB3c-fake-F6hJ1aL5s", "generic-api-key"},
+		{"password", "Fake-Summer2024!", "generic-password"},
+		{"password", "MyVersion-9xQ!", "generic-password"},
+	} {
+		line := c.key + ` = "` + c.value + `"`
+		if r := Classify(Input{Secret: c.value, Match: line, Line: line, FilePath: "a.py", RuleID: c.rule}); !counted(r) {
+			t.Errorf("%q: %+v", line, r)
+		}
+	}
+	// a Secrets Manager SecretId holds a secret NAME
+	for _, l := range []string{`SecretId = "prod/db/credentials"`, `secret_id = "prod/db/creds"`} {
+		if r := run(tc{match: l, line: l, path: "a.py"}); r.Actionable {
+			t.Errorf("%q: %+v", l, r)
+		}
+	}
+	// actionable reasons keep backtick spans intact
+	r := run(tc{secret: "changeme", match: `password = "changeme"`, line: `password = "changeme"`, path: "config.py"})
+	if !strings.Contains(r.Reason, "`*** (8 chars)`") || strings.Contains(r.Reason, "…`") {
+		t.Errorf("mangled reason: %s", r.Reason)
+	}
+}
