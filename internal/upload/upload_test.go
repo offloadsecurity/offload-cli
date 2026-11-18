@@ -270,6 +270,34 @@ func TestDefaultBranchUnknownFallsBackToPartial(t *testing.T) {
 	}
 }
 
+func TestDefaultBranchFallbackOnceAcrossSplit(t *testing.T) {
+	refuse := reply(400, errBody("full_run=true for branch 'feat' ... Pass default_branch=<the repository default>"))
+	srv, got := server(t,
+		reply(413, errBody("too large")), // combined
+		refuse,                           // gitleaks, full run
+		reply(200, okBody("offload-cli/gitleaks")),
+		reply(200, okBody("offload-cli/grype")),
+		reply(200, okBody("offload-cli/trivy")))
+	cfg, _ := testConfig(t, srv.URL)
+	tg := target
+	tg.Branch, tg.DefaultBranch = "feat", ""
+	var out bytes.Buffer
+	if err := Run(&out, cfg, sampleInput(), tg, "v"); err != nil {
+		t.Fatalf("Run: %v\n%s", err, out.String())
+	}
+	if len(*got) != 5 {
+		t.Fatalf("requests = %d, want 5 (one refusal only)", len(*got))
+	}
+	for _, r := range (*got)[3:] {
+		if !strings.Contains(r.query, "full_run=false") {
+			t.Errorf("later batch not partial: %s", r.query)
+		}
+	}
+	if n := strings.Count(out.String(), "default branch"); n != 1 {
+		t.Errorf("fallback warning printed %d times", n)
+	}
+}
+
 func TestUnknownBranchIsPartial(t *testing.T) {
 	srv, got := server(t, reply(200, okBody("offload-cli/gitleaks")))
 	cfg, _ := testConfig(t, srv.URL)

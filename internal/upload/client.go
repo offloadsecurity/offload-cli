@@ -220,7 +220,7 @@ func Upload(cfg *Config, p *Plan, t Target) (*Result, error) {
 	}
 	for i := 0; i < len(batches); i++ {
 		b := batches[i]
-		data, err := post(cfg, b, t, fullRun, res)
+		data, err := post(cfg, b, t, &fullRun, res)
 		var ue *Error
 		if errors.As(err, &ue) && ue.Status == http.StatusRequestEntityTooLarge && len(b.Tools) > 1 {
 			res.Warnings = append(res.Warnings, "the platform refused the combined upload as too large; sending one upload per tool")
@@ -239,14 +239,17 @@ func Upload(cfg *Config, p *Plan, t Target) (*Result, error) {
 	return res, nil
 }
 
-func post(cfg *Config, b Batch, t Target, fullRun bool, res *Result) (*IngestData, error) {
-	data, err := postOnce(cfg, b, t, fullRun)
+// post sends one batch. A full run on a branch needs the default branch;
+// when the platform cannot determine it, it refuses (400). The batch is then
+// retried as a partial upload, said once, and *fullRun is cleared so later
+// batches (a per-tool split) go out partial directly instead of spending
+// another request of the hourly upload limit on the same refusal.
+func post(cfg *Config, b Batch, t Target, fullRun *bool, res *Result) (*IngestData, error) {
+	data, err := postOnce(cfg, b, t, *fullRun)
 	var ue *Error
-	// A full run on a branch needs the default branch; when the platform
-	// cannot determine it, it refuses (400). Retry as a partial upload and
-	// say so: absent findings are then not resolved.
-	if fullRun && errors.As(err, &ue) && ue.Status == http.StatusBadRequest &&
+	if *fullRun && errors.As(err, &ue) && ue.Status == http.StatusBadRequest &&
 		strings.Contains(ue.Msg, "default_branch") {
+		*fullRun = false
 		res.Warnings = append(res.Warnings, "the platform does not know this repository's default branch: sent as a partial upload, so findings absent from this scan are NOT resolved (pass --default-branch)")
 		return postOnce(cfg, b, t, false)
 	}
