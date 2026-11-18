@@ -33,6 +33,27 @@ func mask(value string) string {
 	return string(r[:3]) + "…" + string(r[len(r)-3:]) + " (" + strconv.Itoa(len(r)) + " chars)"
 }
 
+// describe renders the judged value for a reason: its mask, computed from the
+// whole value. Values shorter than four characters (%s, $1) carry no
+// credential and are shown as-is.
+func describe(value string) string {
+	v := norm(value)
+	if utf8.RuneCountInString(v) < 4 {
+		return v
+	}
+	return mask(v)
+}
+
+// describeName renders an assignment name for a reason. A name is normally an
+// identifier; one that looks like key material (a JSON key that is itself a
+// secret) is masked.
+func describeName(name string) string {
+	if looksGenerated(name) || (hasDigit(name) && ShannonEntropy(name) >= 3.5 && utf8.RuneCountInString(name) >= 16) {
+		return mask(name)
+	}
+	return clip(name, 40)
+}
+
 // stubLiterals shortens every quoted literal longer than 8 characters to a
 // three-character stub, so a credential that is not a plain substring of the
 // match (split across literals, or a second secret on the same line) is
@@ -332,6 +353,13 @@ func completeExpression(value, line string) string {
 		}
 	}
 	return value
+}
+
+// generatedLiteral: a bare token (no spaces, quotes or call syntax) that
+// looks generated. Used so a name or a nearby word never dismisses key
+// material on its own.
+func generatedLiteral(v string) bool {
+	return literalTokenRe.MatchString(v) && looksGenerated(v)
 }
 
 // looksGenerated: an identifier-shaped token that is really a key.

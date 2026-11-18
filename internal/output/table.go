@@ -128,7 +128,7 @@ func verdictTag(v verdict.Result) string {
 	case v.Dismissed():
 		return "[" + strings.ToLower(v.Label) + ": " + v.Tag() + "]"
 	case v.NonSecret():
-		return "[review: possibly " + v.Tag() + "]"
+		return "[review: " + v.Tag() + "]"
 	}
 	return ""
 }

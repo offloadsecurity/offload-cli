@@ -206,22 +206,22 @@ If you pin the Action to a commit SHA or a branch instead of a release tag, ther
 A secrets pattern that matches `password` also matches `password = login_data.password` or `--password="${DB_PASS}"`, neither of which puts a credential in source. `offload scan` classifies every gitleaks finding before redacting it and attaches a **verdict** (`likely_secret`, `likely_false_positive` or `not_a_secret`), a **confidence**, the **signals** that fired and a one-line **reason**:
 
 ```
+CRITICAL Uncovered a GitHub Personal Access Token… [review: fails token checksum]
+         app/client.ts:1
 HIGH     Detected a Generic API Key…
          app/settings.py:2
 
 Dismissed as not secrets (heuristic verdicts; not counted toward --fail-on):
-CRITICAL Uncovered a GitHub Personal Access Token… [likely false positive: fails token checksum]
-         app/client.ts:1
 HIGH     Detected a Generic API Key… [not a secret: runtime value]
          app/client.ts:2
 
-Summary: 1 high  (1 counted)  2 dismissed as not secrets
+Summary: 1 critical  1 high  (2 counted)  1 dismissed as not secrets
 ```
 
-- Only a **high-confidence** non-secret verdict dismisses a finding: placeholders, env/secret-store references, runtime expressions, code handling a variable, hashed values, GitHub/npm tokens that fail their built-in checksum. A hardcoded literal that merely looks weak (`password = "admin"`) stays a secret.
+- Only a **high-confidence** non-secret verdict dismisses a finding: placeholders, env/secret-store references, runtime expressions, code handling a variable, hashed values. A hardcoded literal that merely looks weak (`password = "admin"`) stays a secret, and a generated-looking value is never dismissed because of its variable name or a nearby word like `example`. Weaker evidence, such as a GitHub/npm token failing its built-in checksum, is tagged `[review: …]` and still counts.
 - Dismissed findings are **kept**: listed after the real ones, counted in the summary, and excluded from `--fail-on`. JSON carries the verdict as `secret_verdict` (with `summary.dismissed`); SARIF carries it in `properties.secretVerdict` and reports dismissed results at level `note`.
 - `--hide-dismissed` leaves them out of the output (the summary still counts them); `--no-verdicts` restores raw gitleaks behaviour.
-- Verdicts are **heuristics**, not proof: always check the reason. Reasons mask the matched value rather than quote it. gitleaks' own allowlists already drop many placeholders, so verdicts mostly act on what gets past them.
+- Verdicts are **heuristics**, not proof: always check the reason. Reasons describe the value by a mask and never quote the source line. gitleaks' own allowlists already drop many placeholders, so verdicts mostly act on what gets past them.
 
 ## The finding model
 

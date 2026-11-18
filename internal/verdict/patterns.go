@@ -58,8 +58,7 @@ var nonSecretKeyRe = re(`(?i)(?:access(?:ibility|or)|access[_.-]?id|random[_.-]?
 	`(?:id|name|file|path|url|uri|endpoint|length|size|ref|arn|alias|type|kind|version|ttl|` +
 	`expiry|expires?|expiration|prefix|suffix|header|param|field|column|index|hash|digest|` +
 	`fingerprint|store|storetype|vault|manager|provider)|(?:bucket|foreign|hot|idx|natural|` +
-	`primary|pub(?:lic)?|schema|sequence|sort|partition|shard|cache|composite|unique|` +
-	`encryption|kms|signing|verify|verification|ssh|host|gpg|pgp)[_.-]?key|key[_.-]?(?:board|` +
+	`primary|pub(?:lic)?|schema|sequence|sort|partition|shard|composite|unique)[_.-]?key|key[_.-]?(?:board|` +
 	`code|frame|mesh|pair|press(?:ed)?|ring|selector|signature|stone|word|up|down|left|right|` +
 	`stroke|map|set|space|binding|combo|event|handler)|key(?:store|tab)[_.-]?(?:file|path)|` +
 	`issuerkeyhash|[dm]onkey|keying|UserSecretsId|csrf[_.-]?token|xsrf[_.-]?token|` +
@@ -69,6 +68,16 @@ var nonSecretKeyRe = re(`(?i)(?:access(?:ibility|or)|access[_.-]?id|random[_.-]?
 	`length|min|max|strength|reset|change|confirm|form|label|error|invalid|expired|required|` +
 	`placeholder|prompt|regex|pattern|validator)|hash(?:ed)?[_.-]?password|` +
 	`(?:^|[_.-])(?:id|uuid|guid)$)`)
+
+// Private-key names (encryption, signing, ssh, gpg, pgp, kms, host, cache,
+// verify keys) are deliberately absent from the [_.-]?key group above: they
+// name real secret material.
+
+// publicKeyNameRe: names of public material, which keep the key-name
+// dismissal even for a generated-looking value.
+var literalTokenRe = re(`^[A-Za-z0-9+/_\-=.~!@#$%^&*]+$`)
+
+var publicKeyNameRe = re(`(?i)pub(?:lic)?[_.-]?(?:key|token)`)
 
 // idKeyRe (detect-secrets is_likely_id_string): the variable is an identifier.
 var idKeyRe = re(`(?i)(?:^(?:id|myid|userid)|_id)s?$`)

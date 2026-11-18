@@ -199,8 +199,10 @@ func classify(in Input) Result {
 		return r
 	}
 
-	shown := clip(value, 40)
-	shownLine := clip(line, 90)
+	// Reasons never quote the source line (it can carry a second, unquoted
+	// secret) and describe the value only by its mask, built from the whole
+	// value, so clipping can never cut a literal out from under the masking.
+	shown := describe(value)
 	// "Password" context comes from the rule, the key, the line, or a URL
 	// credential: a human-chosen password may be a dictionary word, so it is
 	// medium at most, never a confident dismissal.
@@ -211,9 +213,13 @@ func classify(in Input) Result {
 
 	// The assignment name says it is not a credential: api_version, key_file,
 	// public_key, csrf_token, user_id.
-	if key != "" && generic && (nonSecretKeyRe.MatchString(key) || idKeyRe.MatchString(key)) {
+	// A generated-looking literal (long, mixed case + digits, high entropy)
+	// is judged on its value, whatever the name: the name alone never
+	// dismisses key material. Public-key names keep the dismissal.
+	nameOnly := !generatedLiteral(value) || publicKeyNameRe.MatchString(key)
+	if key != "" && generic && nameOnly && (nonSecretKeyRe.MatchString(key) || idKeyRe.MatchString(key)) {
 		return result(NotASecret, 0.9, fmt.Sprintf("`%s` names a non-secret (an identifier, version, path, "+
-			"public key, endpoint or setting), not a credential.", clip(key, 40)), []string{"non_secret_key_name"}, ctx)
+			"public key, endpoint or setting), not a credential.", describeName(key)), []string{"non_secret_key_name"}, ctx)
 	}
 
 	// Repository-controlled material next to an external lookup: a literal
@@ -240,15 +246,15 @@ func classify(in Input) Result {
 		if fb != "" {
 			if k, _ := valueKind(fb, `x = "`+fb+`"`, in.FilePath, false); k == "literal" && !structuralPlaceholderRe.MatchString(fb) {
 				return result(LikelySecret, 0.78, fmt.Sprintf("A hardcoded fallback/default sits next to the external lookup on "+
-					"`%s`; the literal is usable whenever the lookup is unset. Remove the default; fail closed instead.", shownLine),
+					"this line; the literal is usable whenever the lookup is unset. Remove the default; fail closed instead."),
 					[]string{"hardcoded_fallback_literal"}, ctx)
 			}
 		}
 		break
 	}
 	if concatRe.MatchString(line) && credKeywordRe.MatchString(line) {
-		return result(LikelySecret, 0.7, fmt.Sprintf("`%s` builds the value by concatenating string literals, a "+
-			"statically reconstructable credential.", shownLine), []string{"static_concatenation"}, ctx)
+		return result(LikelySecret, 0.7, fmt.Sprint("The line builds the value by concatenating string literals, a "+
+			"statically reconstructable credential."), []string{"static_concatenation"}, ctx)
 	}
 	if strings.Contains(line, "(") {
 		if loc := encodedLiteralArgRe.FindStringSubmatchIndex(line); loc != nil {
@@ -260,8 +266,8 @@ func classify(in Input) Result {
 			}
 			// config.get("db_password_v2") is a key name, not material
 			if looksEncoded(enc) && !runtimeCalleeRe.MatchString(line[:loc[0]]) {
-				return result(LikelySecret, 0.6, fmt.Sprintf("`%s` passes an encoded literal to a call; base64/hex material "+
-					"committed in source may decode to a credential. Review the decoded value.", shownLine),
+				return result(LikelySecret, 0.6, fmt.Sprint("The line passes an encoded literal to a call; base64/hex material "+
+					"committed in source may decode to a credential. Review the decoded value."),
 					[]string{"encoded_literal_argument"}, ctx)
 			}
 		}
@@ -270,8 +276,11 @@ func classify(in Input) Result {
 	// Offline checksum (GitHub / npm tokens). A failing checksum is fabricated.
 	chkValid, chkOK := GitHubTokenChecksum(value)
 	if chkOK && !chkValid {
-		return result(LikelyFalsePositive, 0.93, "Token has a GitHub/npm prefix but fails the format's built-in CRC32 "+
-			"checksum: a fabricated, redacted or mistyped token, not an issued one.", []string{"checksum_invalid"}, ctx)
+		// Medium, not a dismissal: the checksum algorithm is verified only
+		// against a published example, and if it were wrong every real token
+		// would be dismissed. Still counted toward --fail-on.
+		return result(LikelyFalsePositive, 0.7, "Token has a GitHub/npm prefix but fails the format's built-in CRC32 "+
+			"checksum: likely fabricated, redacted or mistyped. Verify before ignoring.", []string{"checksum_invalid"}, ctx)
 	}
 
 	// Hashed / encrypted forms are not plaintext credentials.
@@ -289,24 +298,24 @@ func classify(in Input) Result {
 			"no credential is hardcoded in source.", shown), ks, ctx)
 	case "expression":
 		if contains(ks, "logs_variable") || (logLineRe.MatchString(line) && contains(ks, "variable_assignment")) {
-			return result(NotASecret, 0.9, fmt.Sprintf("`%s` logs or prints a variable: possible sensitive-data "+
-				"logging, but no credential is hardcoded here.", shownLine), []string{"logs_variable"}, ctx)
+			return result(NotASecret, 0.9, fmt.Sprint("The line logs or prints a variable: possible sensitive-data "+
+				"logging, but no credential is hardcoded here."), []string{"logs_variable"}, ctx)
 		}
 		what := "another variable"
 		if contains(ks, "runtime_expression") {
 			what = "a runtime value"
 		}
-		return result(NotASecret, 0.93, fmt.Sprintf("`%s` assigns %s (`%s`); no credential is hardcoded.", shownLine, what, shown), ks, ctx)
+		return result(NotASecret, 0.93, fmt.Sprintf("The line assigns %s (`%s`); no credential is hardcoded.", what, shown), ks, ctx)
 	case "unresolved_call":
-		return result(NotASecret, 0.6, fmt.Sprintf("`%s` takes the value from a call (`%s`) whose source is not "+
+		return result(NotASecret, 0.6, fmt.Sprintf("The line takes the value from a call (`%s`) whose source is not "+
 			"on this line; it may read a committed config or decode embedded material. Not hardcoded here; verify the source.",
-			shownLine, shown), ks, ctx)
+			shown), ks, ctx)
 	case "control_flow":
-		return result(NotASecret, 0.93, fmt.Sprintf("`%s` handles a variable named like a credential; no credential "+
-			"value appears in source.", shownLine), ks, ctx)
+		return result(NotASecret, 0.93, fmt.Sprint("The line handles a variable named like a credential (control flow or a "+
+			"signature); no credential value appears in source."), ks, ctx)
 	case "empty":
-		return result(LikelyFalsePositive, 0.85, fmt.Sprintf("The pattern matched a credential-named key on `%s` but no "+
-			"value follows it on that line.", shownLine), ks, ctx)
+		return result(LikelyFalsePositive, 0.85, fmt.Sprint("The pattern matched a credential-named key but no "+
+			"value follows it on that line."), ks, ctx)
 	case "placeholder":
 		if passwordRule && contains(ks, "placeholder_value") && !structuralPlaceholderRe.MatchString(value) {
 			// password = "changeme": a common default may be the effective
@@ -361,8 +370,15 @@ func classify(in Input) Result {
 		}
 	}
 	if m := contextBanlistRe.FindStringSubmatch(line); m != nil && generic {
-		return result(LikelyFalsePositive, 0.8, fmt.Sprintf("The line marks this as an example or non-credential (`%s`).", clip(m[1], 20)),
-			[]string{"context_banlist_word"}, ctx)
+		// A word like "example" or "TODO:" anywhere on the line is weak
+		// evidence: a real key often sits next to "# TODO: move to vault".
+		// It dismisses only a value that does not look generated; for a
+		// high-entropy value it is noted at medium confidence (still counted).
+		score, why := 0.8, "The line marks this as an example or non-credential (`%s`)."
+		if generatedLiteral(value) || (literalTokenRe.MatchString(value) && ShannonEntropy(value) >= 3.5 && len([]rune(value)) >= 16) {
+			score, why = 0.65, "The line mentions `%s`, but the value is high-entropy; it may still be a real credential. Review."
+		}
+		return result(LikelyFalsePositive, score, fmt.Sprintf(why, clip(m[1], 20)), []string{"context_banlist_word"}, ctx)
 	}
 	if key != "" && generic {
 		k := strings.ToLower(key)
@@ -371,7 +387,7 @@ func classify(in Input) Result {
 		}
 		if strings.ToLower(value) == k {
 			return result(LikelyFalsePositive, 0.85, fmt.Sprintf("Value equals its own key name (`%s`): a template default, "+
-				"not a credential.", clip(key, 30)), []string{"value_equals_key"}, ctx)
+				"not a credential.", describeName(key)), []string{"value_equals_key"}, ctx)
 		}
 	}
 	if generic && hexRe.MatchString(value) {

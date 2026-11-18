@@ -87,14 +87,14 @@ func TestHeadlineExamples(t *testing.T) {
 	r = run(tc{secret: "password = login_data.password", match: "password = login_data.password",
 		line: "    password = login_data.password", path: "app/auth.py", ruleID: "Hardcoded Password"})
 	if r.Verdict != NotASecret || r.Confidence != High || r.Actionable ||
-		strings.Contains(r.Reason, "login_data.password") || !strings.Contains(r.Reason, "`password = log…ord (19 chars)`") ||
+		strings.Contains(r.Reason, "login_data.password") || !strings.Contains(r.Reason, "`log…ord (19 chars)`") ||
 		!strings.Contains(r.Reason, "runtime") {
 		t.Errorf("runtime assignment: %+v", r)
 	}
 
 	r = run(tc{secret: "password:\n        authenticate(user, pw)", match: "password:\n        authenticate(user, pw)",
 		line: "    if username and password:", path: "app/auth.py", ruleID: "Hardcoded Password"})
-	if r.Verdict != NotASecret || r.Confidence != High || !strings.Contains(r.Reason, "if username and password:") {
+	if r.Verdict != NotASecret || r.Confidence != High || strings.Contains(r.Reason, "username") {
 		t.Errorf("control flow: %+v", r)
 	}
 }
@@ -296,7 +296,8 @@ func TestGitHubChecksum(t *testing.T) {
 	}
 	fake := "ghp_" + strings.Repeat("aB3", 12)
 	r := run(tc{secret: fake, match: fake, line: `token = "` + fake + `"`, ruleID: "github-pat"})
-	if r.Verdict != LikelyFalsePositive || r.Confidence != High || !has(r, "checksum_invalid") {
+	// a failed checksum lowers confidence but never dismisses (stays counted)
+	if r.Verdict != LikelyFalsePositive || r.Confidence != Medium || !r.Actionable || !has(r, "checksum_invalid") {
 		t.Errorf("bad checksum: %+v", r)
 	}
 	r = run(tc{secret: good, match: good, line: `token = "` + good + `"`, ruleID: "github-pat"})
@@ -598,5 +599,63 @@ func BenchmarkClassify(b *testing.B) {
 		Line: `DB_PASSWORD = "Zk9x!q2LmP0vR7sT4wY1"`, FilePath: "settings.py", RuleID: "generic-api-key"}
 	for i := 0; i < b.N; i++ {
 		Classify(in)
+	}
+}
+
+// Regression tests for the independent review of the port. Each case was a
+// real secret dismissed, or raw material echoed, before the fix.
+func TestReviewRegressions(t *testing.T) {
+	const k = "q8Xk9mP2qR7vT4wZ8nB3cF6hJ1aL5s"
+	const other = "Zq8Xk9mP2qR7vT4wZ8nB3cF6hJ1aL5sQ"
+
+	// 1. Private-key names are not non-secret names; a generated literal is
+	// never dismissed on its name alone.
+	for _, c := range []tc{
+		{secret: k, line: `ENCRYPTION_KEY = "` + k + `"`, path: "settings.py"},
+		{secret: k, line: `JWT_SIGNING_KEY = "` + k + `"`, path: "settings.py"},
+		{secret: k, line: `SSH_KEY=` + k, path: ".env"},
+		{secret: k, line: `gpg_key: "` + k + `"`, path: "c.yml"},
+		{secret: k, line: `api_id = "` + k + `"`, path: "c.py"}, // non-secret name, generated value
+	} {
+		if r := run(c); r.Verdict != LikelySecret || !r.Actionable {
+			t.Errorf("%q must stay a likely secret: %+v", c.line, r)
+		}
+	}
+
+	// 2. A context word on the line never dismisses a high-entropy value.
+	for _, line := range []string{
+		`api_key = "` + k + `"  # TODO: move to vault`,
+		`requests.get("https://api.example.com/v1", headers={"api_key": "` + k + `"})`,
+		`API_KEY_V2 = "` + k + `"  # api version 2`,
+	} {
+		if r := run(tc{secret: k, line: line, path: "a.py"}); !r.Actionable || suppressed(r) {
+			t.Errorf("%q must stay counted: %+v", line, r)
+		}
+	}
+	// ...but still dismisses a word-like value
+	if r := run(tc{secret: "my-sample-value", line: `api_key = "my-sample-value"  # example`, path: "a.py"}); r.Actionable {
+		t.Errorf("word-like value on an example line should be dismissed: %+v", r)
+	}
+
+	// 3 + 4. Reasons never carry source-line text or a clipped prefix of a
+	// literal, whatever the verdict.
+	for _, c := range []tc{
+		{secret: "user_password", line: "password = user_password  # old: " + other, path: "x.py"},
+		{secret: "password:", match: "password:", line: "if password: login(user, password); other_api_key = " + other, path: "x.py"},
+		{secret: "", line: `the_very_long_database_password_variable_name = os.environ.get("DATABASE_PASSWORD", "` + other + `")`, path: "a.py"},
+		{secret: "", line: `token = get_password("` + strings.Repeat("a", 60) + `", "` + other + `")`, path: "a.py"},
+		{secret: "logger.info(", line: "logger.info(password) # " + other, path: "a.py"},
+	} {
+		c.ruleID = "Hardcoded Password"
+		if c.match == "" {
+			c.match = c.line
+		}
+		r := run(c)
+		for n := 6; n <= len(other); n++ {
+			if strings.Contains(r.Reason, other[:n]) {
+				t.Errorf("reason leaks %d chars of a literal for %q: %s", n, c.line, r.Reason)
+				break
+			}
+		}
 	}
 }
