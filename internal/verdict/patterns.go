@@ -100,6 +100,12 @@ var locatorRe = re(`^(?:alias/[\w/.-]+|(?:~|\.{1,2})?/[\w ./-]+|` +
 
 var segmentSepRe = re(`[/:]`)
 
+// locatorSepRe: separators removed before judging a locator as a whole.
+var locatorSepRe = re(`[/:.~\-]`)
+
+// uuidAnyRe: a UUID anywhere (a KMS key id in an ARN resource).
+var uuidAnyRe = re(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
+
 // pemJointRe: joints left by a PEM block written as concatenated literals.
 var pemJointRe = re("[\"'`]\\s*(?:\\+|\\.{1,2}|&|~)\\s*[\"'`]")
 

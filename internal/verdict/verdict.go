@@ -218,14 +218,15 @@ func classify(in Input) Result {
 	// A generated-looking literal (long, mixed case + digits, high entropy)
 	// is judged on its value, whatever the name: the name alone never
 	// dismisses key material. Public-key names keep the dismissal.
-	if publicSSHKeyRe.MatchString(value) {
+	if isSSHPublicKey(value) {
 		return result(NotASecret, 0.92, "Value is an SSH public key, not a private credential.",
 			[]string{"public_key_material"}, ctx)
 	}
 	// A secret_id holding key material is a credential (Vault AppRole); one
 	// holding a name (Secrets Manager "prod/db/credentials") is not.
 	secretID := secretIDKeyRe.MatchString(key) &&
-		(keyMaterial(value) || uuidRe.MatchString(value) || (hexRe.MatchString(value) && len(value) >= 32))
+		(keyMaterial(value) || uuidRe.MatchString(value) || (hexRe.MatchString(value) && len(value) >= 32) ||
+			(highEntropyValue(value) && !strings.Contains(value, "/") && hasDigit(value) && hasAlpha(value)))
 	nameOnly := (!keyMaterial(value) || publicKeyNameRe.MatchString(key)) && !secretID
 	if key != "" && generic && nameOnly && (nonSecretKeyRe.MatchString(key) || idKeyRe.MatchString(key)) {
 		return result(NotASecret, 0.9, fmt.Sprintf("`%s` names a non-secret (an identifier, version, path, "+
@@ -353,7 +354,8 @@ func classify(in Input) Result {
 	}
 
 	// Look-alikes a generic pattern trips on.
-	if generic && nonSecretValue(value, passwordRule) {
+	// a name containing "secret" is treated like a password rule here
+	if generic && nonSecretValue(value, passwordRule || strings.Contains(strings.ToLower(key), "secret")) {
 		return result(NotASecret, 0.88, "Value is a resource identifier or a file path (an ARN, a key alias or a "+
 			"path to key material), not the credential itself.", []string{"non_secret_value"}, ctx)
 	}

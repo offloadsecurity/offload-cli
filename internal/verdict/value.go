@@ -1,6 +1,8 @@
 package verdict
 
 import (
+	"encoding/base64"
+	"encoding/binary"
 	"hash/crc32"
 	"math"
 	"strconv"
@@ -48,8 +50,9 @@ func nonSecretValue(v string, passwordRule bool) bool {
 	if passwordRule {
 		return false
 	}
-	if arnRe.MatchString(v) {
-		return true
+	if loc := arnRe.FindStringIndex(v); loc != nil {
+		// only the resource part is judged; a UUID there is a KMS key id
+		return !joinedGenerated(uuidAnyRe.ReplaceAllString(v[loc[1]:], ""))
 	}
 	if !locatorRe.MatchString(v) {
 		return false
@@ -64,7 +67,47 @@ func nonSecretValue(v string, passwordRule bool) bool {
 			return false
 		}
 	}
-	return true
+	return !joinedGenerated(v)
+}
+
+// joinedGenerated: with locator separators removed, does the text read as
+// generated? A secret split into short segments ("/q8Xk9mP2/qR7vT4wZ/...")
+// must not pass as a path just because each piece is short.
+func joinedGenerated(text string) bool {
+	j := locatorSepRe.ReplaceAllString(text, "")
+	return looksGenerated(j) || (utf8.RuneCountInString(j) >= 20 && ShannonEntropy(j) >= 3.5)
+}
+
+// isSSHPublicKey: the type-specific wire prefix, and a blob that decodes to
+// the SSH wire format (the key type string, then at least one more
+// length-prefixed field that fits). A real prefix followed by arbitrary
+// characters is not enough.
+func isSSHPublicKey(v string) bool {
+	if !publicSSHKeyRe.MatchString(v) {
+		return false
+	}
+	parts := strings.Fields(v)
+	if len(parts) < 2 {
+		return false
+	}
+	blob := parts[1]
+	if r := len(blob) % 4; r != 0 {
+		blob += strings.Repeat("=", 4-r)
+	}
+	data, err := base64.StdEncoding.DecodeString(blob)
+	if err != nil || len(data) < 8 {
+		return false
+	}
+	n := int(binary.BigEndian.Uint32(data[:4]))
+	if n > len(data)-4 || string(data[4:4+n]) != parts[0] {
+		return false
+	}
+	rest := data[4+n:]
+	if len(rest) < 4 {
+		return false
+	}
+	m := int(binary.BigEndian.Uint32(rest[:4]))
+	return m > 0 && m <= len(rest)-4
 }
 
 // keyMaterial: a bare token that could be key material in any case:

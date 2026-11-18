@@ -817,3 +817,41 @@ func TestReviewRound3(t *testing.T) {
 		t.Errorf("mangled reason: %s", r.Reason)
 	}
 }
+
+// Fourth review round: generated secrets shaped like locators.
+func TestReviewRound4(t *testing.T) {
+	const gen = "q8Xk9mP2qR7vT4wZ8nB3cF6hJ1aL5s"
+	counted := func(r Result) bool { return r.Actionable && !suppressed(r) }
+	for _, c := range []struct{ key, value string }{
+		{"aws_secret_access_key", "/q8Xk9mP2/qR7vT4wZ/8nB3cF6h/J1aL5sWq/9Yt2"},
+		{"api_secret", "/q8Xk9mP2qR/vT4wZ8nB3c"},
+		{"secret", "/Summer2024"},
+		{"client_secret", "~/Xk9mP2qR7v/T4wZ8nB3cF"},
+		{"api_key", "alias/q8Xk9mP2/qR7vT4wZ8/nB3cF6hJ1"},
+		{"api_key", "arn:aws:s3:::" + gen},
+		{"api_key", "arn:aws:iam::123456789012:" + gen},
+		{"api_key", "q8Xk9mP2/qR7vT4wZ8.key"},
+		{"password", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5" + gen},
+		{"token", "ssh-rsa AAAAB3NzaC1yc2E" + gen},
+		{"secret_id", "7c1e9d42-4f1a-4b8e-9a3d-2f6b8c0e1d57"},
+	} {
+		rule := "generic-api-key"
+		if c.key == "password" {
+			rule = "generic-password"
+		}
+		line := c.key + ` = "` + c.value + `"`
+		if r := Classify(Input{Secret: c.value, Match: line, Line: line, FilePath: "a.py", RuleID: rule}); !counted(r) {
+			t.Errorf("%q: %+v", line, r)
+		}
+	}
+	for _, c := range []struct{ line, signal string }{
+		{`kms_key = "arn:aws:kms:us-east-1:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab"`, "non_secret_value"},
+		{`encryption_key = "alias/aws/s3"`, "non_secret_value"},
+		{`ssh_key = "~/.ssh/id_rsa"`, "non_secret_value"},
+		{`SecretId = "prod/db/credentials"`, "non_secret_key_name"},
+	} {
+		if r := run(tc{match: c.line, line: c.line, path: "a.py"}); r.Actionable || !has(r, c.signal) {
+			t.Errorf("%q: %+v", c.line, r)
+		}
+	}
+}
