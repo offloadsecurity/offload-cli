@@ -59,8 +59,16 @@ runs:
         # The CLI: prefer the checksum-verified release binary that matches the
         # action ref. github.action_ref can be empty in composite actions, so
         # fall back to the ref directory name under _actions/<owner>/<repo>/<ref>.
+        semver='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+        if [ -n "$IN_CLI_VERSION" ]; then
+          case "$IN_CLI_VERSION" in v*) ;; *) IN_CLI_VERSION="v$IN_CLI_VERSION" ;; esac
+          if ! [[ "$IN_CLI_VERSION" =~ $semver ]]; then
+            echo "::error::cli-version '${IN_CLI_VERSION}' must be a release tag like v0.2.0"
+            exit 1
+          fi
+        fi
         ref="${IN_CLI_VERSION:-${ACTION_REF:-$(basename "$GITHUB_ACTION_PATH")}}"
-        if [[ "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+        if [[ "$ref" =~ $semver ]]; then
           sh "$GITHUB_ACTION_PATH/install.sh" --version "$ref" --bin-dir "$bin"
         elif command -v go >/dev/null 2>&1; then
           echo "::notice::Action ref '${ref}' is not a release tag, so there is no prebuilt binary to download. Building offload-cli from the action source with $(go version)."

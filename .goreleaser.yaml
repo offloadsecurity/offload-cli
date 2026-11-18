@@ -69,8 +69,9 @@ homebrew_casks:
       branch: main
       token: '{{ index .Env "HOMEBREW_TAP_GITHUB_TOKEN" }}'
     # No token (forks, or before the secret is added): build the cask but
-    # don't push it, instead of failing the release.
-    skip_upload: '{{ if index .Env "HOMEBREW_TAP_GITHUB_TOKEN" }}false{{ else }}true{{ end }}'
+    # don't push it, instead of failing the release. With a token, "auto"
+    # still skips prerelease tags, so stable installs never get an -rc.
+    skip_upload: '{{ if index .Env "HOMEBREW_TAP_GITHUB_TOKEN" }}auto{{ else }}true{{ end }}'
     commit_author:
       name: offload-release-bot
       email: noreply@offloadsecurity.com
