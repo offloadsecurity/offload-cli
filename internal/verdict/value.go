@@ -1,6 +1,8 @@
 package verdict
 
 import (
+	"encoding/base64"
+	"encoding/binary"
 	"hash/crc32"
 	"math"
 	"strconv"
@@ -23,14 +25,139 @@ func clip(s string, n int) string {
 }
 
 // mask renders a possibly-real credential the way it may appear in a reason:
-// recognisable, never usable. It reveals no more than the redacted snippet
-// (first and last three characters).
+// recognisable, never usable. Nothing of a value under 12 characters, at most
+// four characters overall, and a prefix only from 20.
 func mask(value string) string {
 	r := []rune(norm(value))
-	if len(r) <= 8 {
+	n := strconv.Itoa(len(r))
+	switch {
+	case len(r) == 0:
 		return "***"
+	case len(r) < 12:
+		return "*** (" + n + " chars)"
+	case len(r) < 20:
+		return "…" + string(r[len(r)-2:]) + " (" + n + " chars)"
 	}
-	return string(r[:3]) + "…" + string(r[len(r)-3:]) + " (" + strconv.Itoa(len(r)) + " chars)"
+	return string(r[:2]) + "…" + string(r[len(r)-2:]) + " (" + n + " chars)"
+}
+
+// nonSecretValue: a locator rather than a credential: a real ARN, a key alias
+// or a path to key material. Never under a password rule (password =
+// "/Summer2024" is a password), and never when a segment is itself key
+// material: a base64 secret can start with "/", and anything can be prefixed
+// with "alias/".
+func nonSecretValue(v string, passwordRule bool) bool {
+	if passwordRule {
+		return false
+	}
+	if loc := arnRe.FindStringIndex(v); loc != nil {
+		// only the resource part is judged; a UUID there is a KMS key id
+		return !joinedGenerated(uuidAnyRe.ReplaceAllString(v[loc[1]:], ""))
+	}
+	if !locatorRe.MatchString(v) {
+		return false
+	}
+	for _, seg := range segmentSepRe.Split(v, -1) {
+		stem := seg
+		if i := strings.LastIndexByte(seg, '.'); i > 0 {
+			stem = seg[:i]
+		}
+		if stem != "" && (looksGenerated(stem) || highEntropyValue(stem) ||
+			(utf8.RuneCountInString(stem) >= 20 && ShannonEntropy(stem) >= 3.5)) {
+			return false
+		}
+	}
+	return !joinedGenerated(v)
+}
+
+// joinedGenerated: with locator separators removed, does the text read as
+// generated? A secret split into short segments ("/q8Xk9mP2/qR7vT4wZ/...")
+// must not pass as a path just because each piece is short.
+func joinedGenerated(text string) bool {
+	j := locatorSepRe.ReplaceAllString(text, "")
+	return looksGenerated(j) || (utf8.RuneCountInString(j) >= 20 && ShannonEntropy(j) >= 3.5)
+}
+
+// isSSHPublicKey: the type-specific wire prefix, and a blob that decodes to
+// the SSH wire format (the key type string, then at least one more
+// length-prefixed field that fits). A real prefix followed by arbitrary
+// characters is not enough.
+func isSSHPublicKey(v string) bool {
+	if !publicSSHKeyRe.MatchString(v) {
+		return false
+	}
+	parts := strings.Fields(v)
+	if len(parts) < 2 {
+		return false
+	}
+	blob := parts[1]
+	if r := len(blob) % 4; r != 0 {
+		blob += strings.Repeat("=", 4-r)
+	}
+	data, err := base64.StdEncoding.DecodeString(blob)
+	if err != nil || len(data) < 8 {
+		return false
+	}
+	n := int(binary.BigEndian.Uint32(data[:4]))
+	if n > len(data)-4 || string(data[4:4+n]) != parts[0] {
+		return false
+	}
+	rest := data[4+n:]
+	if len(rest) < 4 {
+		return false
+	}
+	m := int(binary.BigEndian.Uint32(rest[:4]))
+	return m > 0 && m <= len(rest)-4
+}
+
+// keyMaterial: a bare token that could be key material in any case:
+// generated-looking, or 20+ characters with entropy >= 3.5. Pure hex and
+// UUIDs are excluded (the usual shape of identifiers under id-style names; a
+// *secret_id* is handled by name), as are paths, ARNs and aliases.
+func keyMaterial(v string) bool {
+	if !literalTokenRe.MatchString(v) {
+		return false
+	}
+	if looksGenerated(v) {
+		return true
+	}
+	if hexRe.MatchString(v) || uuidRe.MatchString(v) || nonSecretValue(v, false) {
+		return false
+	}
+	for _, rx := range formatPlaceholderRes {
+		if rx.MatchString(v) {
+			return false
+		}
+	}
+	return utf8.RuneCountInString(v) >= 20 && ShannonEntropy(v) >= 3.5
+}
+
+// highEntropyValue judges the value alone, any characters: long and varied
+// enough to be a generated credential rather than a word.
+func highEntropyValue(v string) bool {
+	return utf8.RuneCountInString(v) >= 12 && !strings.ContainsAny(v, " \t\r\n") && ShannonEntropy(v) >= 3.0
+}
+
+// stripTrailingComment drops a trailing "# ..." or "// ..." comment from a
+// statement's right-hand side (outside quotes, after whitespace).
+func stripTrailingComment(rhs string) string {
+	var quote byte
+	for i := 0; i < len(rhs); i++ {
+		ch := rhs[i]
+		if quote != 0 {
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch {
+		case isQuote(ch):
+			quote = ch
+		case i > 0 && (rhs[i-1] == ' ' || rhs[i-1] == '\t') && (ch == '#' || strings.HasPrefix(rhs[i:], "//")):
+			return strings.TrimRightFunc(rhs[:i], unicode.IsSpace)
+		}
+	}
+	return rhs
 }
 
 // describe renders the judged value for a reason: its mask, computed from the
@@ -214,7 +341,7 @@ func ExtractCandidateValue(secret, match string) string {
 	}
 	switch {
 	case m != nil && !strings.Contains(first, "://"):
-		value = namedGroup(m, keyedAssignRe, "val")
+		value = stripTrailingComment(namedGroup(m, keyedAssignRe, "val"))
 	case strings.Contains(value, "\n"):
 		value = first
 	}

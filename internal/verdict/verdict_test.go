@@ -3,6 +3,7 @@ package verdict
 import (
 	"hash/crc32"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -66,7 +67,7 @@ func TestHeadlineExamples(t *testing.T) {
 	r = run(tc{secret: `password="${MONGO_PASS}`, match: `password="${MONGO_PASS}`,
 		line: `mongo --password="${MONGO_PASS}" --eval x`, path: "scripts/backup.sh", ruleID: "Hardcoded Password"})
 	if r.Verdict != LikelyFalsePositive || r.Confidence != High || r.Actionable ||
-		strings.Contains(r.Reason, "${MONGO_PASS}") || !strings.Contains(r.Reason, "`${M…SS} (13 chars)`") ||
+		strings.Contains(r.Reason, "${MONGO_PASS}") || !strings.Contains(r.Reason, "`…S} (13 chars)`") ||
 		!strings.Contains(r.Reason, "environment variable") {
 		t.Errorf("env ref in flag: %+v", r)
 	}
@@ -87,7 +88,7 @@ func TestHeadlineExamples(t *testing.T) {
 	r = run(tc{secret: "password = login_data.password", match: "password = login_data.password",
 		line: "    password = login_data.password", path: "app/auth.py", ruleID: "Hardcoded Password"})
 	if r.Verdict != NotASecret || r.Confidence != High || r.Actionable ||
-		strings.Contains(r.Reason, "login_data.password") || !strings.Contains(r.Reason, "`log…ord (19 chars)`") ||
+		strings.Contains(r.Reason, "login_data.password") || !strings.Contains(r.Reason, "`…rd (19 chars)`") ||
 		!strings.Contains(r.Reason, "runtime") {
 		t.Errorf("runtime assignment: %+v", r)
 	}
@@ -656,6 +657,201 @@ func TestReviewRegressions(t *testing.T) {
 				t.Errorf("reason leaks %d chars of a literal for %q: %s", n, c.line, r.Reason)
 				break
 			}
+		}
+	}
+}
+
+// Second review round: shapes the first fixes still mishandled.
+func TestReviewRound2(t *testing.T) {
+	const hex64 = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+	const lower = "k3j9x8v2m4n7b5q1w6e0r8t2y4u9i3o7"
+	const gen = "q8Xk9mP2qR7vT4wZ8nB3cF6hJ1aL5s"
+	counted := func(r Result) bool { return r.Actionable && !suppressed(r) }
+
+	// 1. A line word never dismisses a value it is not in.
+	for _, c := range []struct{ value, rule, word string }{
+		{"Tr0ub4dor&3", "generic-password", "# TODO: rotate"},
+		{"hunter2xyz99", "generic-password", "# TODO: rotate"},
+		{"Tr0ub4dor&3", "generic-api-key", "# example"},
+		{"Xk9#mP2:qR7vT4wZ8nB3cF6", "generic-api-key", "# TODO: move to vault"},
+		{"Xk9#mP2:qR7vT4wZ8nB3cF6", "generic-password", "# sample"},
+		{hex64, "generic-api-key", "# example"},
+		{lower, "generic-api-key", "# version 2"},
+	} {
+		key := "api_key"
+		if strings.Contains(c.rule, "password") {
+			key = "password"
+		}
+		line := key + ` = "` + c.value + `"  ` + c.word
+		for _, in := range []Input{
+			{Secret: c.value, Match: key + ` = "` + c.value + `"`, Line: line, FilePath: "a.py", RuleID: c.rule},
+			{Match: line, Line: line, FilePath: "a.py", RuleID: c.rule},
+		} {
+			if r := Classify(in); !counted(r) {
+				t.Errorf("%q (secret %q): %+v", line, in.Secret, r)
+			}
+		}
+	}
+	if r := run(tc{secret: "api-example-value-01", line: `api_key = "api-example-value-01"`, path: "a.py"}); r.Actionable {
+		t.Errorf("a banlist word inside the value still dismisses: %+v", r)
+	}
+
+	// 2. A concatenated private key is judged by its real body and never quoted.
+	body := "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKjMzEfYyjiWA4R4M2bS1GB4t7NXp98C3SC6dVM" +
+		"vDuictGeurT8jNbvJZHtCSuYEvuNMoSfm76oqFvAp8Gy0iz5sxjZmSnXyCdPEovGhLa0VzMaQ8s"
+	header, footer := "-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----"
+	line := `const k = "` + header + `\n" + "` + body + `\n" + "` + footer + `";`
+	if r := run(tc{secret: line, match: line, line: line, path: "a.js", ruleID: "private-key"}); r.Verdict != LikelySecret ||
+		!r.Actionable || strings.Contains(r.Reason, body[:8]) {
+		t.Errorf("concatenated key: %+v", r)
+	}
+	pem := header + `\nNOTAREALKEY123\n` + footer
+	if r := run(tc{secret: pem, match: pem, line: `"k": "` + pem + `"`, path: "c.json", ruleID: "private-key"}); r.Actionable ||
+		strings.Contains(r.Reason, "NOTAREALKEY") {
+		t.Errorf("short placeholder body: %+v", r)
+	}
+
+	// 3. Public halves, locators and cache keys are not secrets.
+	for _, c := range []struct{ line, signal string }{
+		{`verify_key = "` + hex64 + `"`, "non_secret_key_name"},
+		{`verification_key = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A"`, "non_secret_key_name"},
+		{`ssh_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl u@h"`, "public_key_material"},
+		{`host_key = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTY"`, "public_key_material"},
+		{`kms_key = "arn:aws:kms:us-east-1:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab"`, "non_secret_value"},
+		{`encryption_key = "alias/aws/s3"`, "non_secret_value"},
+		{`ssh_key = "~/.ssh/id_rsa"`, "non_secret_value"},
+		{`cache_key = f"user:{uid}:profile"`, "non_secret_key_name"},
+		{`CACHE_KEY = "users:list:v2"`, "non_secret_key_name"},
+	} {
+		if r := run(tc{match: c.line, line: c.line, path: "a.py"}); r.Actionable || !has(r, c.signal) {
+			t.Errorf("%q: %+v", c.line, r)
+		}
+	}
+
+	// 4. Key material under id-style names is not dismissed; hex ids are.
+	for _, c := range []tc{
+		{line: "SECRET_ID=" + lower, path: ".env"},
+		{line: `vault_secret_id = "` + hex64 + `"`, path: "a.py"},
+		{line: "ROLE_SECRET_ID=7c1e9d42-4f1a-4b8e-9a3d-2f6b8c0e1d57", path: ".env"},
+		{line: `token_hash = "` + gen + `"`, path: "a.py"},
+		{line: `secret_key_version: "` + gen + `"`, path: "c.yml"},
+		{line: `cache_key = "` + gen + `"`, path: "a.py"},
+	} {
+		c.match = c.line
+		if r := run(c); !counted(r) {
+			t.Errorf("%q: %+v", c.line, r)
+		}
+	}
+	if r := run(tc{match: `user_id = "` + hex64[:32] + `"`, line: `user_id = "` + hex64[:32] + `"`, path: "a.py"}); r.Actionable {
+		t.Errorf("hex id under user_id should stay dismissed: %+v", r)
+	}
+
+	// Placeholder- or hash-looking values under credential names stay counted.
+	for _, l := range []string{`db_password = "changeme9"`, `password = "your_Zx9kq2Lmw"`, `api_key = "` + hex64 + `"  # sha256 checksum`} {
+		if r := run(tc{match: l, line: l, path: "a.py", ruleID: "generic-password"}); !counted(r) {
+			t.Errorf("%q: %+v", l, r)
+		}
+	}
+}
+
+func TestMaskRevealsLittle(t *testing.T) {
+	for _, c := range []struct {
+		v     string
+		shown int
+	}{{"short1", 0}, {"elevenchars", 0}, {"twelve_chars", 2}, {"nineteen_characters", 2}, {"twenty_characters_x1", 4}} {
+		m := mask(c.v)
+		revealed := strings.NewReplacer("…", "", "***", "").Replace(strings.SplitN(m, " (", 2)[0])
+		if len([]rune(revealed)) != c.shown || !strings.Contains(m, "("+strconv.Itoa(len(c.v))+" chars)") {
+			t.Errorf("mask(%q) = %q", c.v, m)
+		}
+	}
+}
+
+func TestExtractStripsTrailingComment(t *testing.T) {
+	for _, c := range []struct{ match, want string }{
+		{"password = hunter2xyz99  # TODO: rotate", "hunter2xyz99"},
+		{"password = hunter2xyz99 // old", "hunter2xyz99"},
+		{`password = "a#b c"  # note`, "a#b c"},
+		{"password = abc#123", "abc#123"},
+	} {
+		if got := ExtractCandidateValue("", c.match); got != c.want {
+			t.Errorf("ExtractCandidateValue(%q) = %q, want %q", c.match, got, c.want)
+		}
+	}
+}
+
+// Third review round.
+func TestReviewRound3(t *testing.T) {
+	const gen = "q8Xk9mP2qR7vT4wZ8nB3cF6hJ1aL5s"
+	counted := func(r Result) bool { return r.Actionable && !suppressed(r) }
+	for _, c := range []struct{ key, value, rule string }{
+		{"aws_secret_access_key", "/" + gen + "Wq9Yt2Zb4", "generic-api-key"}, // base64 secret starting with "/"
+		{"secret", "/Xk9mP2qR7vT4wZ8nB3c/F6hJ1aL5sWq9Yt2Zb4dE", "generic-api-key"},
+		{"password", "/Summer2024", "generic-password"},
+		{"password", "./Passw0rd-x", "generic-password"},
+		{"api_key", "alias/" + gen, "generic-api-key"},
+		{"token", "arn:aws:x:" + gen, "generic-api-key"},
+		{"password", "arn:aws:Summer2024", "generic-password"},
+		{"api_key", "q8Xk9mP2qR7vT4/wZ8nB3cF6hJ1aL5s.key", "generic-api-key"},
+		{"client_secret", "abc/" + gen + ".json", "generic-api-key"},
+		{"password", "ssh-rsa AAAA" + gen, "generic-password"}, // no rsa wire prefix
+		{"api_key", "q8Xk9mP2qR7vT4-example-wZ8nB3cF6hJ1aL5s", "generic-api-key"},
+		{"api_key", "sk_live_q8Xk9mP2qR7vT4wZ8nB3c-fake-F6hJ1aL5s", "generic-api-key"},
+		{"password", "Fake-Summer2024!", "generic-password"},
+		{"password", "MyVersion-9xQ!", "generic-password"},
+	} {
+		line := c.key + ` = "` + c.value + `"`
+		if r := Classify(Input{Secret: c.value, Match: line, Line: line, FilePath: "a.py", RuleID: c.rule}); !counted(r) {
+			t.Errorf("%q: %+v", line, r)
+		}
+	}
+	// a Secrets Manager SecretId holds a secret NAME
+	for _, l := range []string{`SecretId = "prod/db/credentials"`, `secret_id = "prod/db/creds"`} {
+		if r := run(tc{match: l, line: l, path: "a.py"}); r.Actionable {
+			t.Errorf("%q: %+v", l, r)
+		}
+	}
+	// actionable reasons keep backtick spans intact
+	r := run(tc{secret: "changeme", match: `password = "changeme"`, line: `password = "changeme"`, path: "config.py"})
+	if !strings.Contains(r.Reason, "`*** (8 chars)`") || strings.Contains(r.Reason, "…`") {
+		t.Errorf("mangled reason: %s", r.Reason)
+	}
+}
+
+// Fourth review round: generated secrets shaped like locators.
+func TestReviewRound4(t *testing.T) {
+	const gen = "q8Xk9mP2qR7vT4wZ8nB3cF6hJ1aL5s"
+	counted := func(r Result) bool { return r.Actionable && !suppressed(r) }
+	for _, c := range []struct{ key, value string }{
+		{"aws_secret_access_key", "/q8Xk9mP2/qR7vT4wZ/8nB3cF6h/J1aL5sWq/9Yt2"},
+		{"api_secret", "/q8Xk9mP2qR/vT4wZ8nB3c"},
+		{"secret", "/Summer2024"},
+		{"client_secret", "~/Xk9mP2qR7v/T4wZ8nB3cF"},
+		{"api_key", "alias/q8Xk9mP2/qR7vT4wZ8/nB3cF6hJ1"},
+		{"api_key", "arn:aws:s3:::" + gen},
+		{"api_key", "arn:aws:iam::123456789012:" + gen},
+		{"api_key", "q8Xk9mP2/qR7vT4wZ8.key"},
+		{"password", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5" + gen},
+		{"token", "ssh-rsa AAAAB3NzaC1yc2E" + gen},
+		{"secret_id", "7c1e9d42-4f1a-4b8e-9a3d-2f6b8c0e1d57"},
+	} {
+		rule := "generic-api-key"
+		if c.key == "password" {
+			rule = "generic-password"
+		}
+		line := c.key + ` = "` + c.value + `"`
+		if r := Classify(Input{Secret: c.value, Match: line, Line: line, FilePath: "a.py", RuleID: rule}); !counted(r) {
+			t.Errorf("%q: %+v", line, r)
+		}
+	}
+	for _, c := range []struct{ line, signal string }{
+		{`kms_key = "arn:aws:kms:us-east-1:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab"`, "non_secret_value"},
+		{`encryption_key = "alias/aws/s3"`, "non_secret_value"},
+		{`ssh_key = "~/.ssh/id_rsa"`, "non_secret_value"},
+		{`SecretId = "prod/db/credentials"`, "non_secret_key_name"},
+	} {
+		if r := run(tc{match: c.line, line: c.line, path: "a.py"}); r.Actionable || !has(r, c.signal) {
+			t.Errorf("%q: %+v", c.line, r)
 		}
 	}
 }

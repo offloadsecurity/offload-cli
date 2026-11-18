@@ -58,7 +58,8 @@ var nonSecretKeyRe = re(`(?i)(?:access(?:ibility|or)|access[_.-]?id|random[_.-]?
 	`(?:id|name|file|path|url|uri|endpoint|length|size|ref|arn|alias|type|kind|version|ttl|` +
 	`expiry|expires?|expiration|prefix|suffix|header|param|field|column|index|hash|digest|` +
 	`fingerprint|store|storetype|vault|manager|provider)|(?:bucket|foreign|hot|idx|natural|` +
-	`primary|pub(?:lic)?|schema|sequence|sort|partition|shard|composite|unique)[_.-]?key|key[_.-]?(?:board|` +
+	`primary|pub(?:lic)?|schema|sequence|sort|partition|shard|cache|composite|unique|verify|verification)` +
+	`[_.-]?key|key[_.-]?(?:board|` +
 	`code|frame|mesh|pair|press(?:ed)?|ring|selector|signature|stone|word|up|down|left|right|` +
 	`stroke|map|set|space|binding|combo|event|handler)|key(?:store|tab)[_.-]?(?:file|path)|` +
 	`issuerkeyhash|[dm]onkey|keying|UserSecretsId|csrf[_.-]?token|xsrf[_.-]?token|` +
@@ -69,15 +70,47 @@ var nonSecretKeyRe = re(`(?i)(?:access(?:ibility|or)|access[_.-]?id|random[_.-]?
 	`placeholder|prompt|regex|pattern|validator)|hash(?:ed)?[_.-]?password|` +
 	`(?:^|[_.-])(?:id|uuid|guid)$)`)
 
-// Private-key names (encryption, signing, ssh, gpg, pgp, kms, host, cache,
-// verify keys) are deliberately absent from the [_.-]?key group above: they
-// name real secret material.
+// Private-key names (encryption, signing, ssh, gpg, pgp, kms, host keys) are
+// deliberately absent from the [_.-]?key group above: they name real secret
+// material. A verify/verification key is the public half and a cache key is a
+// lookup key; key material under any of these names still overrides.
 
 // publicKeyNameRe: names of public material, which keep the key-name
 // dismissal even for a generated-looking value.
 var literalTokenRe = re(`^[A-Za-z0-9+/_\-=.~!@#$%^&*]+$`)
 
-var publicKeyNameRe = re(`(?i)pub(?:lic)?[_.-]?(?:key|token)`)
+var publicKeyNameRe = re(`(?i)pub(?:lic)?[_.-]?(?:key|token)|verif(?:y|ication)[_.-]?key`)
+
+// secretIDKeyRe: a secret_id (e.g. a Vault AppRole SecretID) is a credential,
+// never an identifier.
+var secretIDKeyRe = re(`(?i)secret[_.-]?ids?$`)
+
+// publicSSHKeyRe: an SSH/ECDSA public key value. The wire format starts with
+// the key type, so a real key's base64 blob has a type-specific prefix; a
+// bare "AAAA" is not enough.
+var publicSSHKeyRe = re(`^(?:ssh-rsa\s+AAAAB3NzaC1yc2E|ssh-dss\s+AAAAB3NzaC1kc3M|ssh-ed25519\s+AAAAC3NzaC1lZDI1NTE5|` +
+	`ecdsa-sha2-nistp\d+\s+AAAAE2VjZHNhLXNoYTItbmlzdHA)[A-Za-z0-9+/=]*(?:\s|$)`)
+
+// arnRe: a real ARN (arn:partition:service:region:account-or-empty:resource).
+var arnRe = re(`^arn:aws[\w-]*:[a-z0-9-]+:[a-z0-9-]*:(?:\d{12})?:`)
+
+// locatorRe: a key alias or a path to key material (see nonSecretValue).
+var locatorRe = re(`^(?:alias/[\w/.-]+|(?:~|\.{1,2})?/[\w ./-]+|` +
+	`[\w.-]+(?:/[\w.-]+)+\.(?:pem|key|pub|crt|cer|der|p12|pfx|jks|json|txt|asc|gpg))$`)
+
+var segmentSepRe = re(`[/:]`)
+
+// locatorSepRe: separators removed before judging a locator as a whole.
+var locatorSepRe = re(`[/:.~\-]`)
+
+// uuidAnyRe: a UUID anywhere (a KMS key id in an ARN resource).
+var uuidAnyRe = re(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
+
+// pemJointRe: joints left by a PEM block written as concatenated literals.
+var pemJointRe = re("[\"'`]\\s*(?:\\+|\\.{1,2}|&|~)\\s*[\"'`]")
+
+// pemQuoteWSRe: whitespace and quotes inside a PEM body.
+var pemQuoteWSRe = re("[\\s'\"`]")
 
 // idKeyRe (detect-secrets is_likely_id_string): the variable is an identifier.
 var idKeyRe = re(`(?i)(?:^(?:id|myid|userid)|_id)s?$`)

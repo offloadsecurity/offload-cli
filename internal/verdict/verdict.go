@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Verdict uses the Offload platform's verdict vocabulary. (confirmed_secret,
@@ -60,7 +61,7 @@ const (
 
 // Version identifies the heuristic set, so a stored verdict can be told apart
 // from one produced by later rules.
-const Version = 3
+const Version = 4
 
 var labels = map[Verdict]string{
 	LikelySecret:        "Likely secret",
@@ -157,7 +158,8 @@ func Classify(in Input) (res Result) {
 	if res.Actionable || !res.NonSecret() {
 		// Anything a reviewer will act on is redacted: the raw inputs and the
 		// value the classifier judged are masked, quoted literals stubbed.
-		res.Reason = stubLiterals(maskValues(res.Reason, in.Secret, in.Match, judged), true)
+		// Backtick spans are the reason's own quoting (masks, words): kept.
+		res.Reason = stubLiterals(maskValues(res.Reason, in.Secret, in.Match, judged), false)
 	} else {
 		// Even a dismissal never quotes the scanner's raw value: a verdict
 		// is a heuristic, and output must not carry a credential if it is
@@ -216,7 +218,16 @@ func classify(in Input) Result {
 	// A generated-looking literal (long, mixed case + digits, high entropy)
 	// is judged on its value, whatever the name: the name alone never
 	// dismisses key material. Public-key names keep the dismissal.
-	nameOnly := !generatedLiteral(value) || publicKeyNameRe.MatchString(key)
+	if isSSHPublicKey(value) {
+		return result(NotASecret, 0.92, "Value is an SSH public key, not a private credential.",
+			[]string{"public_key_material"}, ctx)
+	}
+	// A secret_id holding key material is a credential (Vault AppRole); one
+	// holding a name (Secrets Manager "prod/db/credentials") is not.
+	secretID := secretIDKeyRe.MatchString(key) &&
+		(keyMaterial(value) || uuidRe.MatchString(value) || (hexRe.MatchString(value) && len(value) >= 32) ||
+			(highEntropyValue(value) && !strings.Contains(value, "/") && hasDigit(value) && hasAlpha(value)))
+	nameOnly := (!keyMaterial(value) || publicKeyNameRe.MatchString(key)) && !secretID
 	if key != "" && generic && nameOnly && (nonSecretKeyRe.MatchString(key) || idKeyRe.MatchString(key)) {
 		return result(NotASecret, 0.9, fmt.Sprintf("`%s` names a non-secret (an identifier, version, path, "+
 			"public key, endpoint or setting), not a credential.", describeName(key)), []string{"non_secret_key_name"}, ctx)
@@ -317,9 +328,19 @@ func classify(in Input) Result {
 		return result(LikelyFalsePositive, 0.85, fmt.Sprint("The pattern matched a credential-named key but no "+
 			"value follows it on that line."), ks, ctx)
 	case "placeholder":
-		if passwordRule && contains(ks, "placeholder_value") && !structuralPlaceholderRe.MatchString(value) {
-			// password = "changeme": a common default may be the effective
-			// password. Visible and actionable; a reviewer decides.
+		varied := hasDigit(value) && hasAlpha(value) && highEntropyValue(value)
+		if contains(ks, "placeholder_marker_in_value") && varied && hasLower(value) && hasUpper(value) &&
+			utf8.RuneCountInString(value) >= 20 {
+			// a long generated-looking value that merely contains a marker
+			// word ("q8Xk…-example-…") is not dismissed on the word
+			return result(LikelyFalsePositive, 0.65, fmt.Sprintf("Value contains a placeholder word but is long and "+
+				"generated-looking (`%s`); it may still be a real credential. Review.", shown), ks, ctx)
+		}
+		if passwordRule && ((contains(ks, "placeholder_value") && (!structuralPlaceholderRe.MatchString(value) || varied)) ||
+			contains(ks, "placeholder_marker_in_value")) {
+			// password = "changeme" / "changeme9" / "your_Zx9kq2Lmw": a default
+			// or placeholder-looking word may be the effective password.
+			// Visible and actionable; a reviewer decides.
 			return result(LikelyFalsePositive, 0.65, fmt.Sprintf("Value is a common default (`%s`). Usually a placeholder, but a "+
 				"default that is actually in use is a real credential. Verify.", shown), []string{"common_default_value"}, ctx)
 		}
@@ -333,6 +354,11 @@ func classify(in Input) Result {
 	}
 
 	// Look-alikes a generic pattern trips on.
+	// a name containing "secret" is treated like a password rule here
+	if generic && nonSecretValue(value, passwordRule || strings.Contains(strings.ToLower(key), "secret")) {
+		return result(NotASecret, 0.88, "Value is a resource identifier or a file path (an ARN, a key alias or a "+
+			"path to key material), not the credential itself.", []string{"non_secret_value"}, ctx)
+	}
 	if lockFiles[base] || ext == ".sum" || ext == ".lock" {
 		return result(LikelyFalsePositive, 0.9, fmt.Sprintf("Match is in a dependency lockfile (`%s`): integrity hashes and "+
 			"resolved URLs, not credentials.", base), []string{"lockfile"}, ctx)
@@ -370,13 +396,18 @@ func classify(in Input) Result {
 		}
 	}
 	if m := contextBanlistRe.FindStringSubmatch(line); m != nil && generic {
-		// A word like "example" or "TODO:" anywhere on the line is weak
-		// evidence: a real key often sits next to "# TODO: move to vault".
-		// It dismisses only a value that does not look generated; for a
-		// high-entropy value it is noted at medium confidence (still counted).
+		// The word dismisses only when it is inside the value itself
+		// ("my-example-key"). Anywhere else on the line (a comment, a URL) it
+		// is weak evidence: a real key often sits next to "# TODO: move to
+		// vault". Medium confidence, still counted.
 		score, why := 0.8, "The line marks this as an example or non-credential (`%s`)."
-		if generatedLiteral(value) || (literalTokenRe.MatchString(value) && ShannonEntropy(value) >= 3.5 && len([]rune(value)) >= 16) {
-			score, why = 0.65, "The line mentions `%s`, but the value is high-entropy; it may still be a real credential. Review."
+		switch {
+		case !contextBanlistRe.MatchString(value):
+			score, why = 0.65, "The line mentions `%s`, but not in the value itself; it may still be a real credential. Review."
+		case passwordRule || highEntropyValue(value) || keyMaterial(value):
+			// inside the value, but a password or a generated-looking value
+			// may still be real ("Fake-Summer2024!"): medium, still counted
+			score, why = 0.65, "The value contains `%s`, but it may still be a real credential. Review."
 		}
 		return result(LikelyFalsePositive, score, fmt.Sprintf(why, clip(m[1], 20)), []string{"context_banlist_word"}, ctx)
 	}
@@ -394,7 +425,12 @@ func classify(in Input) Result {
 		switch n := len(value); n {
 		case 32, 40, 64, 128:
 			if m := hashContextRe.FindStringSubmatch(line); m != nil {
-				return result(NotASecret, 0.88, fmt.Sprintf("%d-character hex value on a line about hashes/checksums "+
+				// under a credential-named key the line word is weak evidence
+				score := 0.88
+				if key != "" && credKeywordRe.MatchString(key) {
+					score = 0.65
+				}
+				return result(NotASecret, score, fmt.Sprintf("%d-character hex value on a line about hashes/checksums "+
 					"(`%s`): a content hash, not a credential.", n, clip(m[1], 20)), []string{"hash_lookalike"}, ctx)
 			}
 		}
@@ -498,16 +534,20 @@ func pemAssessment(value, context string, ctx []string) (Result, bool) {
 			"a possible embedded key until reviewed.", []string{"pem_header_body_unknown"}, ctx), true
 	}
 	body := full[pemFullRe.SubexpIndex("body")]
-	// literal "\n" sequences (JSON) and real whitespace both separate lines
-	body = whitespaceRe.ReplaceAllString(escapedWSRe.ReplaceAllString(body, ""), "")
-	if len(body) < 64 || !base64BodyRe.MatchString(body) {
-		shown := clip(body, 24)
-		if shown == "" {
-			shown = "(empty)"
-		}
-		return result(LikelyFalsePositive, 0.92, fmt.Sprintf("Private-key block has a %d-character body (`%s`); a real "+
-			"PEM key body is hundreds of base64 characters. This is a placeholder.", len(body), shown),
+	// literal "\n" sequences (JSON) and real whitespace both separate lines;
+	// a key written as concatenated literals leaves quote/operator joints
+	body = escapedWSRe.ReplaceAllString(body, "")
+	body = pemQuoteWSRe.ReplaceAllString(pemJointRe.ReplaceAllString(body, ""), "")
+	if len(body) < 64 {
+		// The body is never quoted: only its length (it may be key material).
+		return result(LikelyFalsePositive, 0.92, fmt.Sprintf("Private-key block has a %d-character body; a real "+
+			"PEM key body is hundreds of base64 characters. This is a placeholder.", len(body)),
 			[]string{"pem_placeholder_body"}, ctx), true
+	}
+	if !base64BodyRe.MatchString(body) {
+		// Long but not plain base64: never dismissed, a reviewer decides.
+		return result(LikelySecret, 0.6, fmt.Sprintf("Private-key block with a %d-character body that is not plain "+
+			"base64; treat as a possible embedded key until reviewed.", len(body)), []string{"pem_body_unrecognised"}, ctx), true
 	}
 	return result(LikelySecret, 0.9, fmt.Sprintf("PEM private-key block with a %d-character base64 body: a real "+
 		"key format embedded in source.", len(body)), []string{"pem_private_key_body"}, ctx), true
