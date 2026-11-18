@@ -8,9 +8,9 @@ Third-party tools
 ------------------------------------------------------------------------------
 
 offload-cli orchestrates the following independent, separately-licensed tools
-by invoking them as external programs. It does not embed, link, or redistribute
-their code. Each remains the property of its respective owner and is used under
-its own license:
+by invoking them as external programs. The offload binary does not embed or
+link their code. Each remains the property of its respective owner and is used
+under its own license:
 
   - Syft      — Apache License 2.0 — © Anchore, Inc.
                 https://github.com/anchore/syft
@@ -20,6 +20,22 @@ its own license:
                 https://github.com/aquasecurity/trivy
   - Gitleaks  — MIT License        — © Zachary Rice
                 https://github.com/gitleaks/gitleaks
+
+Redistribution in the container image
+-------------------------------------
+
+The container image ghcr.io/offloadsecurity/offload-cli redistributes, unmodified,
+the official release binaries of the four tools above, at the versions pinned in
+scanners.env (also copied into the image at /usr/share/offload-cli/scanners.env).
+Each binary's license file, taken from its upstream release archive, is
+included in the image at /usr/share/licenses/<tool>/LICENSE. Those binaries
+also contain third-party Go modules under their own licenses, as listed by each
+upstream project. The image is based on Alpine Linux, whose packages carry
+their own licenses, and the offload binary is built with the Go toolchain
+(BSD-3-Clause, /usr/share/licenses/go/LICENSE).
+
+The GitHub Action and install.sh (with --with-scanners) download the same
+official release binaries from each project's GitHub Releases at install time.
 
 ------------------------------------------------------------------------------
 Bundled third-party material
