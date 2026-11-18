@@ -28,6 +28,10 @@ const (
 	EnvCACert = "OFFLOAD_CA_CERT"
 )
 
+// defaultBranchUnknown is the platform's refusal of a branch full run whose
+// default branch it cannot determine (cicd_integration_service.ingest_sarif).
+const defaultBranchUnknown = "default branch is not known"
+
 // Retry policy: bounded, for 408/429/5xx and network errors.
 const (
 	maxAttempts   = 4
@@ -247,8 +251,11 @@ func Upload(cfg *Config, p *Plan, t Target) (*Result, error) {
 func post(cfg *Config, b Batch, t Target, fullRun *bool, res *Result) (*IngestData, error) {
 	data, err := postOnce(cfg, b, t, *fullRun)
 	var ue *Error
-	if *fullRun && errors.As(err, &ue) && ue.Status == http.StatusBadRequest &&
-		strings.Contains(ue.Msg, "default_branch") {
+	// Only the platform's "default branch is not known" refusal, and only
+	// when no default branch was sent: a 400 that rejects a default_branch
+	// value we did send is a real error and must surface.
+	if *fullRun && t.DefaultBranch == "" && errors.As(err, &ue) && ue.Status == http.StatusBadRequest &&
+		strings.Contains(ue.Msg, defaultBranchUnknown) {
 		*fullRun = false
 		res.Warnings = append(res.Warnings, "the platform does not know this repository's default branch: sent as a partial upload, so findings absent from this scan are NOT resolved (pass --default-branch)")
 		return postOnce(cfg, b, t, false)

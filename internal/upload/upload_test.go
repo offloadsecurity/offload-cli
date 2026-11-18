@@ -270,8 +270,63 @@ func TestDefaultBranchUnknownFallsBackToPartial(t *testing.T) {
 	}
 }
 
+// platformUnknownDefault is the platform's real refusal text.
+const platformUnknownDefault = "full_run=true for branch 'feat', but the repository's default branch is not known " +
+	"(not given, and no earlier upload or code scan recorded it): a full run resolves findings it does not report, " +
+	"so it must know which branch's findings it is replacing. Pass default_branch=<the repository default>, or upload without full_run."
+
+func TestFallbackOnlyForUnknownDefaultRefusal(t *testing.T) {
+	cases := []struct {
+		name          string
+		msg           string
+		defaultBranch string
+		wantRequests  int
+		wantErr       bool
+	}{
+		{"unknown default, none sent", platformUnknownDefault, "", 2, false},
+		{"validation error naming default_branch", "default_branch: branch contains invalid characters", "", 1, true},
+		{"refusal while a default was sent", platformUnknownDefault, "main", 1, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, got := server(t, reply(400, errBody(tc.msg)), reply(200, okBody("offload-cli/gitleaks")))
+			cfg, _ := testConfig(t, srv.URL)
+			in := sampleInput()
+			in.Findings, in.Tools = in.Findings[:1], []ToolRun{{"gitleaks", StatusOK}}
+			tg := target
+			tg.Branch, tg.DefaultBranch = "feat", tc.defaultBranch
+			err := Run(io.Discard, cfg, in, tg, "v")
+			if (err != nil) != tc.wantErr || len(*got) != tc.wantRequests {
+				t.Fatalf("err=%v requests=%d, want err=%v requests=%d", err, len(*got), tc.wantErr, tc.wantRequests)
+			}
+		})
+	}
+}
+
+func TestPackageVulnRuleTitleIsPackageIndependent(t *testing.T) {
+	mk := func(pkg string) finding.Finding {
+		return finding.New(finding.Finding{Category: finding.CategoryPackageVuln, Severity: finding.High,
+			Title: "CVE-2023-0286 in " + pkg, RuleID: "CVE-2023-0286", PrimaryIdentifier: "CVE-2023-0286",
+			Package: pkg, Version: "1", Tool: "grype"})
+	}
+	p, err := BuildPlan(Input{Findings: []finding.Finding{mk("openssl"), mk("libssl3")},
+		Tools: []ToolRun{{"grype", StatusOK}}}, "", "v")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var log sarifLog
+	json.Unmarshal(p.whole.Body, &log)
+	run := log.Runs[0]
+	if len(run.Tool.Driver.Rules) != 1 || run.Tool.Driver.Rules[0].ShortDescription.Text != "CVE-2023-0286" {
+		t.Errorf("rule title = %+v, want the advisory id alone", run.Tool.Driver.Rules)
+	}
+	if !strings.Contains(run.Results[1].Message.Text, "libssl3") {
+		t.Errorf("per-package text lost from result message: %q", run.Results[1].Message.Text)
+	}
+}
+
 func TestDefaultBranchFallbackOnceAcrossSplit(t *testing.T) {
-	refuse := reply(400, errBody("full_run=true for branch 'feat' ... Pass default_branch=<the repository default>"))
+	refuse := reply(400, errBody(platformUnknownDefault))
 	srv, got := server(t,
 		reply(413, errBody("too large")), // combined
 		refuse,                           // gitleaks, full run
@@ -295,6 +350,17 @@ func TestDefaultBranchFallbackOnceAcrossSplit(t *testing.T) {
 	}
 	if n := strings.Count(out.String(), "default branch"); n != 1 {
 		t.Errorf("fallback warning printed %d times", n)
+	}
+}
+
+func TestTargetProblemRefusesUpload(t *testing.T) {
+	srv, got := server(t, reply(200, okBody("offload-cli/gitleaks")))
+	cfg, _ := testConfig(t, srv.URL)
+	tg := target
+	tg.Problem = "pull request from a fork"
+	var out bytes.Buffer
+	if err := Run(&out, cfg, sampleInput(), tg, "v"); err == nil || len(*got) != 0 {
+		t.Fatalf("err=%v requests=%d: a target problem must refuse before sending", err, len(*got))
 	}
 }
 
@@ -466,8 +532,20 @@ func TestDetectTarget(t *testing.T) {
 	}
 	defer func(g func(string, ...string) (string, error)) { gitRunner = g }(gitRunner)
 
-	evPath := filepath.Join(t.TempDir(), "event.json")
-	os.WriteFile(evPath, []byte(`{"repository":{"default_branch":"trunk"}}`), 0o600)
+	tmp := t.TempDir()
+	writeEv := func(name, body string) string {
+		p := filepath.Join(tmp, name)
+		os.WriteFile(p, []byte(body), 0o600)
+		return p
+	}
+	evPath := writeEv("event.json", `{"repository":{"full_name":"o/r","default_branch":"trunk"}}`)
+	sameRepoEv := writeEv("same.json", `{"repository":{"full_name":"o/r","default_branch":"trunk"},"pull_request":{"head":{"repo":{"full_name":"o/r"}}}}`)
+	forkEv := writeEv("fork.json", `{"repository":{"full_name":"o/r","default_branch":"trunk"},"pull_request":{"head":{"repo":{"full_name":"contributor/r"}}}}`)
+	ghPR := func(head, ev string) map[string]string {
+		return map[string]string{"GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": "o/r",
+			"GITHUB_HEAD_REF": head, "GITHUB_REF": "refs/pull/12/merge", "GITHUB_REF_NAME": "12/merge",
+			"GITHUB_EVENT_PATH": ev}
+	}
 
 	cases := []struct {
 		name  string
@@ -482,12 +560,44 @@ func TestDetectTarget(t *testing.T) {
 				"rev-parse --show-prefix": "svc/"},
 			nil, Target{},
 			Target{Repository: "https://github.com/o/r", Branch: "feat/x", DefaultBranch: "main", CommitSHA: "abcdef1234567", PathPrefix: "svc"}},
-		{"github actions PR",
-			map[string]string{"rev-parse --abbrev-ref HEAD": "HEAD", "rev-parse HEAD": "1234567abc"},
-			map[string]string{"GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": "o/r", "GITHUB_HEAD_REF": "pr-branch",
-				"GITHUB_REF_NAME": "12/merge", "GITHUB_EVENT_PATH": evPath},
+		{"same-repo PR uses its head branch",
+			map[string]string{"remote get-url origin": "https://github.com/o/r", "rev-parse --abbrev-ref HEAD": "HEAD", "rev-parse HEAD": "1234567abc"},
+			ghPR("pr-branch", sameRepoEv),
 			Target{},
 			Target{Repository: "https://github.com/o/r", Branch: "pr-branch", DefaultBranch: "trunk", CommitSHA: "1234567abc"}},
+		{"fork PR named like the default branch gets its own pull scope",
+			map[string]string{"remote get-url origin": "https://github.com/o/r", "rev-parse HEAD": "1234567abc"},
+			ghPR("trunk", forkEv),
+			Target{},
+			Target{Repository: "https://github.com/o/r", Branch: "pull/12/merge", DefaultBranch: "trunk", CommitSHA: "1234567abc"}},
+		{"fork PR with any name gets its own pull scope",
+			map[string]string{"remote get-url origin": "https://github.com/o/r"},
+			ghPR("feature", forkEv),
+			Target{},
+			Target{Repository: "https://github.com/o/r", Branch: "pull/12/merge", DefaultBranch: "trunk"}},
+		{"same-repo PR whose head is the default branch gets its own pull scope",
+			map[string]string{"remote get-url origin": "https://github.com/o/r"},
+			ghPR("trunk", sameRepoEv),
+			Target{},
+			Target{Repository: "https://github.com/o/r", Branch: "pull/12/merge", DefaultBranch: "trunk"}},
+		{"fork PR without a pull ref is refused",
+			map[string]string{"remote get-url origin": "https://github.com/o/r"},
+			func() map[string]string { m := ghPR("trunk", forkEv); delete(m, "GITHUB_REF"); return m }(),
+			Target{},
+			Target{Repository: "https://github.com/o/r", DefaultBranch: "trunk", Problem: "x"}},
+		{"another checkout ignores the workflow's GitHub context",
+			map[string]string{"remote get-url origin": "https://github.com/org/B", "rev-parse --abbrev-ref HEAD": "develop",
+				"rev-parse HEAD": "abcdef1234567", "symbolic-ref --short refs/remotes/origin/HEAD": "origin/master"},
+			map[string]string{"GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": "org/A", "GITHUB_REF_TYPE": "branch",
+				"GITHUB_REF_NAME": "main", "GITHUB_SHA": "fedcba9876543", "GITHUB_EVENT_PATH": evPath},
+			Target{},
+			Target{Repository: "https://github.com/org/B", Branch: "develop", DefaultBranch: "master", CommitSHA: "abcdef1234567"}},
+		{"no git remote falls back to the workflow repo",
+			map[string]string{},
+			map[string]string{"GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": "o/r", "GITHUB_REF_TYPE": "branch",
+				"GITHUB_REF_NAME": "main", "GITHUB_SHA": "fedcba9876543", "GITHUB_EVENT_PATH": evPath},
+			Target{},
+			Target{Repository: "https://github.com/o/r", Branch: "main", DefaultBranch: "trunk", CommitSHA: "fedcba9876543"}},
 		{"detached HEAD, no CI",
 			map[string]string{"remote get-url origin": "https://github.com/o/r", "rev-parse --abbrev-ref HEAD": "HEAD"},
 			nil, Target{},
@@ -500,7 +610,11 @@ func TestDetectTarget(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			gitRunner = fake(tc.git)
-			if got := DetectTarget("/repo", tc.flags, envOf(tc.env)); got != tc.want {
+			got := DetectTarget("/repo", tc.flags, envOf(tc.env))
+			if tc.want.Problem != "" && got.Problem != "" {
+				got.Problem = tc.want.Problem // asserted present; wording checked elsewhere
+			}
+			if got != tc.want {
 				t.Errorf("got %+v\nwant %+v", got, tc.want)
 			}
 		})

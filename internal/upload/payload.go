@@ -209,6 +209,18 @@ func toResult(f finding.Finding, prefix string) sarifResult {
 	return res
 }
 
+// ruleTitle is the rule's shortDescription, which the platform uses as the
+// title of EVERY result of that rule. A package vulnerability's title names
+// the package ("CVE-x in openssl") while its rule (the advisory) is shared by
+// every affected package, so its rule title is the advisory id alone; the
+// package stays in each result's message and packageName property.
+func ruleTitle(f finding.Finding, ruleID string) string {
+	if f.Category == finding.CategoryPackageVuln {
+		return ruleID
+	}
+	return f.Title
+}
+
 func buildRun(tool string, ok bool, fs []finding.Finding, prefix, version string) sarifRun {
 	rules := []sarifRule{}
 	seen := map[string]bool{}
@@ -224,7 +236,7 @@ func buildRun(tool string, ok bool, fs []finding.Finding, prefix, version string
 			rules = append(rules, sarifRule{
 				ID:               r.RuleID,
 				Name:             string(f.Category),
-				ShortDescription: sarifText{Text: f.Title},
+				ShortDescription: sarifText{Text: ruleTitle(f, r.RuleID)},
 				HelpURI:          help,
 				Properties:       map[string]interface{}{"tags": tags(f.Category)},
 			})

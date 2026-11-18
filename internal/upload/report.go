@@ -11,6 +11,11 @@ import (
 // or not everything, reached the platform.
 func Run(w io.Writer, cfg *Config, in Input, t Target, version string) error {
 	fmt.Fprintf(w, "\nUploading to %s\n", cfg.BaseURL)
+	if t.Problem != "" {
+		err := &Error{Msg: t.Problem}
+		fmt.Fprintf(w, "  ✗ upload failed: %s\n", err.Msg)
+		return err
+	}
 	if t.Repository == "" {
 		err := &Error{Msg: "cannot tell which repository these findings belong to: pass --repository https://host/owner/repo (no git remote \"origin\" found)"}
 		fmt.Fprintf(w, "  ✗ upload failed: %s\n", err.Msg)

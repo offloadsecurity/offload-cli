@@ -20,6 +20,8 @@ type Target struct {
 	// PathPrefix is the scanned directory's path inside the repository
 	// ("" at the root), prepended to finding paths.
 	PathPrefix string
+	// Problem, when set, is why nothing may be uploaded for this target.
+	Problem string
 }
 
 // Env is the environment lookup (os.Getenv in production).
@@ -92,24 +94,48 @@ func stripUserinfo(s string) string {
 	return s
 }
 
-// DetectTarget fills in what the flags left empty: GitHub Actions'
-// environment first, then git in dir.
+// DetectTarget fills in what the flags left empty. The scanned directory's
+// own git remote names the repository; GitHub Actions' context (branch,
+// default branch, commit, pull request) is used only when that repository
+// is the workflow's own, so scanning another checkout never files findings
+// under the workflow's repository or branch.
 func DetectTarget(dir string, flags Target, env Env) Target {
 	t := flags
+	remote := ""
+	if r, err := gitRunner(dir, "remote", "get-url", "origin"); err == nil {
+		remote = NormalizeRepository(r)
+	}
+	ghRepo := ""
+	if srv, repo := env("GITHUB_SERVER_URL"), env("GITHUB_REPOSITORY"); srv != "" && repo != "" {
+		ghRepo = NormalizeRepository(strings.TrimSuffix(srv, "/") + "/" + repo)
+	}
 	if t.Repository == "" {
-		if srv, repo := env("GITHUB_SERVER_URL"), env("GITHUB_REPOSITORY"); srv != "" && repo != "" {
-			t.Repository = strings.TrimSuffix(srv, "/") + "/" + repo
-		} else if remote, err := gitRunner(dir, "remote", "get-url", "origin"); err == nil {
-			t.Repository = remote
+		t.Repository = remote
+		if t.Repository == "" {
+			t.Repository = ghRepo
 		}
 	}
 	t.Repository = NormalizeRepository(t.Repository)
+	useGH := ghRepo != "" && strings.EqualFold(t.Repository, ghRepo)
+	var ev ghEvent
+	if useGH {
+		ev = readEvent(env)
+	}
+
+	if t.DefaultBranch == "" && useGH {
+		t.DefaultBranch = ev.Repository.DefaultBranch
+	}
+	if t.DefaultBranch == "" {
+		if ref, err := gitRunner(dir, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"); err == nil {
+			t.DefaultBranch = strings.TrimPrefix(ref, "origin/")
+		}
+	}
 
 	if t.Branch == "" {
 		switch {
-		case env("GITHUB_HEAD_REF") != "": // pull_request: the PR's branch
-			t.Branch = env("GITHUB_HEAD_REF")
-		case env("GITHUB_REF_TYPE") == "branch" && env("GITHUB_REF_NAME") != "":
+		case useGH && env("GITHUB_HEAD_REF") != "": // pull_request / pull_request_target
+			t.Branch, t.Problem = prBranch(env, ev, t.DefaultBranch)
+		case useGH && env("GITHUB_REF_TYPE") == "branch" && env("GITHUB_REF_NAME") != "":
 			t.Branch = env("GITHUB_REF_NAME")
 		default:
 			if b, err := gitRunner(dir, "rev-parse", "--abbrev-ref", "HEAD"); err == nil && b != "HEAD" {
@@ -118,19 +144,10 @@ func DetectTarget(dir string, flags Target, env Env) Target {
 		}
 	}
 
-	if t.DefaultBranch == "" {
-		t.DefaultBranch = githubDefaultBranch(env)
-	}
-	if t.DefaultBranch == "" {
-		if ref, err := gitRunner(dir, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"); err == nil {
-			t.DefaultBranch = strings.TrimPrefix(ref, "origin/")
-		}
-	}
-
 	if t.CommitSHA == "" {
 		if sha, err := gitRunner(dir, "rev-parse", "HEAD"); err == nil {
 			t.CommitSHA = sha
-		} else {
+		} else if useGH {
 			t.CommitSHA = env("GITHUB_SHA")
 		}
 	}
@@ -144,24 +161,48 @@ func DetectTarget(dir string, flags Target, env Env) Target {
 	return t
 }
 
-// githubDefaultBranch reads repository.default_branch from the Actions
-// event payload, when there is one.
-func githubDefaultBranch(env Env) string {
-	p := env("GITHUB_EVENT_PATH")
-	if p == "" {
-		return ""
+var pullRef = regexp.MustCompile(`^refs/(pull/[0-9]+/(?:merge|head))$`)
+
+// prBranch picks the branch a pull request's findings are filed under. The
+// head branch name is used only for a same-repository PR whose head is not
+// the default branch. A PR from a fork (or one whose origin cannot be
+// confirmed), or whose head is named like the default branch, is filed under
+// its own pull/<N>/merge scope instead: a contributor's branch "main" must
+// never become the default branch's full run.
+func prBranch(env Env, ev ghEvent, defaultBranch string) (branch, problem string) {
+	head := env("GITHUB_HEAD_REF")
+	headRepo, baseRepo := ev.PullRequest.Head.Repo.FullName, ev.Repository.FullName
+	sameRepo := headRepo != "" && baseRepo != "" && strings.EqualFold(headRepo, baseRepo)
+	if sameRepo && head != defaultBranch {
+		return head, ""
 	}
-	raw, err := os.ReadFile(p)
-	if err != nil {
-		return ""
+	if m := pullRef.FindStringSubmatch(env("GITHUB_REF")); m != nil {
+		return m[1], ""
 	}
-	var ev struct {
-		Repository struct {
-			DefaultBranch string `json:"default_branch"`
-		} `json:"repository"`
+	return "", "pull request from a fork (or with a head branch named like the default branch) and no refs/pull/<N> ref to scope it by: refusing to upload so it cannot land in the default branch's findings (pass --branch to override)"
+}
+
+type ghEvent struct {
+	Repository struct {
+		FullName      string `json:"full_name"`
+		DefaultBranch string `json:"default_branch"`
+	} `json:"repository"`
+	PullRequest struct {
+		Head struct {
+			Repo struct {
+				FullName string `json:"full_name"`
+			} `json:"repo"`
+		} `json:"head"`
+	} `json:"pull_request"`
+}
+
+// readEvent reads the Actions event payload, when there is one.
+func readEvent(env Env) ghEvent {
+	var ev ghEvent
+	if p := env("GITHUB_EVENT_PATH"); p != "" {
+		if raw, err := os.ReadFile(p); err == nil {
+			_ = json.Unmarshal(raw, &ev)
+		}
 	}
-	if json.Unmarshal(raw, &ev) != nil {
-		return ""
-	}
-	return ev.Repository.DefaultBranch
+	return ev
 }
