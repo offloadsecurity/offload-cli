@@ -23,14 +23,70 @@ func clip(s string, n int) string {
 }
 
 // mask renders a possibly-real credential the way it may appear in a reason:
-// recognisable, never usable. It reveals no more than the redacted snippet
-// (first and last three characters).
+// recognisable, never usable. Nothing of a value under 12 characters, at most
+// four characters overall, and a prefix only from 20.
 func mask(value string) string {
 	r := []rune(norm(value))
-	if len(r) <= 8 {
+	n := strconv.Itoa(len(r))
+	switch {
+	case len(r) == 0:
 		return "***"
+	case len(r) < 12:
+		return "*** (" + n + " chars)"
+	case len(r) < 20:
+		return "…" + string(r[len(r)-2:]) + " (" + n + " chars)"
 	}
-	return string(r[:3]) + "…" + string(r[len(r)-3:]) + " (" + strconv.Itoa(len(r)) + " chars)"
+	return string(r[:2]) + "…" + string(r[len(r)-2:]) + " (" + n + " chars)"
+}
+
+// keyMaterial: a bare token that could be key material in any case:
+// generated-looking, or 20+ characters with entropy >= 3.5. Pure hex and
+// UUIDs are excluded (the usual shape of identifiers under id-style names; a
+// *secret_id* is handled by name), as are paths, ARNs and aliases.
+func keyMaterial(v string) bool {
+	if !literalTokenRe.MatchString(v) {
+		return false
+	}
+	if looksGenerated(v) {
+		return true
+	}
+	if hexRe.MatchString(v) || uuidRe.MatchString(v) || nonSecretValueRe.MatchString(v) {
+		return false
+	}
+	for _, rx := range formatPlaceholderRes {
+		if rx.MatchString(v) {
+			return false
+		}
+	}
+	return utf8.RuneCountInString(v) >= 20 && ShannonEntropy(v) >= 3.5
+}
+
+// highEntropyValue judges the value alone, any characters: long and varied
+// enough to be a generated credential rather than a word.
+func highEntropyValue(v string) bool {
+	return utf8.RuneCountInString(v) >= 12 && !strings.ContainsAny(v, " \t\r\n") && ShannonEntropy(v) >= 3.0
+}
+
+// stripTrailingComment drops a trailing "# ..." or "// ..." comment from a
+// statement's right-hand side (outside quotes, after whitespace).
+func stripTrailingComment(rhs string) string {
+	var quote byte
+	for i := 0; i < len(rhs); i++ {
+		ch := rhs[i]
+		if quote != 0 {
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch {
+		case isQuote(ch):
+			quote = ch
+		case i > 0 && (rhs[i-1] == ' ' || rhs[i-1] == '\t') && (ch == '#' || strings.HasPrefix(rhs[i:], "//")):
+			return strings.TrimRightFunc(rhs[:i], unicode.IsSpace)
+		}
+	}
+	return rhs
 }
 
 // describe renders the judged value for a reason: its mask, computed from the
@@ -214,7 +270,7 @@ func ExtractCandidateValue(secret, match string) string {
 	}
 	switch {
 	case m != nil && !strings.Contains(first, "://"):
-		value = namedGroup(m, keyedAssignRe, "val")
+		value = stripTrailingComment(namedGroup(m, keyedAssignRe, "val"))
 	case strings.Contains(value, "\n"):
 		value = first
 	}
